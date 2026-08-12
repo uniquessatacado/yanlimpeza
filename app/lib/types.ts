@@ -21,7 +21,7 @@ export type ServiceOption = {
   service_id: string;
   name: string;
   pricing_mode: "fixed" | "per_m2" | "per_unit";
-  sale_price: number;
+  sale_price: number | null;
   cost_price: number | null;
   duration_minutes: number;
   return_months: number;
@@ -135,4 +135,3 @@ export type FollowUp = {
   client?: Client;
   service?: Pick<Service, "name"> | null;
 };
-
