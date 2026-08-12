@@ -51,7 +51,7 @@ trap cleanup EXIT
 
 log "Preparando o servidor"
 apt-get update -y
-apt-get install -y ca-certificates curl xz-utils tar openssl certbot
+apt-get install -y ca-certificates curl xz-utils tar openssl python3-venv
 
 TOTAL_MEMORY_MB="$(free -m | awk '/^Mem:/ {print $2}')"
 TOTAL_SWAP_MB="$(free -m | awk '/^Swap:/ {print $2}')"
@@ -312,9 +312,31 @@ log "Configurando o domínio"
 write_http_vhost
 reload_nginx
 
+prepare_certbot() {
+  local system_certbot certbot_venv
+  system_certbot="$(command -v certbot 2>/dev/null || true)"
+  if [[ -n "${system_certbot}" ]] && "${system_certbot}" --version >/dev/null 2>&1; then
+    CERTBOT_BIN="${system_certbot}"
+    return
+  fi
+
+  log "Preparando o certificado HTTPS"
+  certbot_venv="/opt/yan-certbot"
+  python3 -m venv "${certbot_venv}"
+  "${certbot_venv}/bin/python" -m pip install \
+    --disable-pip-version-check \
+    --no-cache-dir \
+    --upgrade pip setuptools wheel certbot
+  CERTBOT_BIN="${certbot_venv}/bin/certbot"
+  "${CERTBOT_BIN}" --version >/dev/null
+}
+
+CERTBOT_BIN=""
+prepare_certbot
+
 if [[ ! -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]]; then
   log "Gerando o certificado HTTPS"
-  certbot certonly \
+  "${CERTBOT_BIN}" certonly \
     --webroot \
     --webroot-path "${ACME_ROOT}" \
     --domain "${DOMAIN}" \
@@ -377,6 +399,32 @@ set -e
 systemctl reload nginx 2>/dev/null || systemctl reload openresty 2>/dev/null || "${NGINX_BIN}" -s reload
 EOF
 chmod 755 /etc/letsencrypt/renewal-hooks/deploy/reload-yan-nginx.sh
+
+cat > /etc/systemd/system/yan-certbot-renew.service <<EOF
+[Unit]
+Description=Renovar certificado HTTPS do YAN Limpeza
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${CERTBOT_BIN} renew --quiet
+EOF
+
+cat > /etc/systemd/system/yan-certbot-renew.timer <<'EOF'
+[Unit]
+Description=Renovação automática do HTTPS do YAN Limpeza
+
+[Timer]
+OnCalendar=*-*-* 03:20:00
+RandomizedDelaySec=12h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now yan-certbot-renew.timer
 
 curl -fsS --max-time 10 --resolve "${DOMAIN}:443:127.0.0.1" "https://${DOMAIN}/" >/dev/null
 
