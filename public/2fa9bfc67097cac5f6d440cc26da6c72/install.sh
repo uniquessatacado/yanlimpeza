@@ -9,8 +9,9 @@ APP_USER="yanapp"
 APP_ROOT="/opt/yan-limpeza"
 APP_HOME="/var/lib/yan-limpeza"
 APP_PORT="3107"
+APP_VERSION="9"
 PACKAGE_URL="https://yan-limpeza.clovispsilva.chatgpt.site/2fa9bfc67097cac5f6d440cc26da6c72/yan-limpeza.tar.gz"
-PACKAGE_SHA256="04196d1c8a1fa79e003d0b12f23e36ec466cdf54553fca118c37e259cfaf1272"
+PACKAGE_SHA256="998ac252bc357724d74b666bff9f161ccefe7fd3b442f75dee5b6286d8c79d59"
 TMP_DIR="$(mktemp -d)"
 RELEASE_ID="$(date -u +%Y%m%d%H%M%S)"
 RELEASE_DIR="${APP_ROOT}/releases/${RELEASE_ID}"
@@ -48,6 +49,10 @@ trap 'rollback $LINENO' ERR
 trap cleanup EXIT
 
 [[ "${EUID}" -eq 0 ]] || fail "Execute este comando depois de entrar como root."
+
+if [[ -L "${APP_ROOT}/current" && -f "${APP_ROOT}/current/package.json" ]]; then
+  log "Atualizando o YAN Limpeza para a versão ${APP_VERSION}"
+fi
 
 log "Preparando o servidor"
 apt-get update -y
