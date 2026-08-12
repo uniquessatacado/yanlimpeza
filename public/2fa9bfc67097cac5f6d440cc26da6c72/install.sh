@@ -97,7 +97,7 @@ install_node
 hash -r
 NODE_BIN=""
 for candidate in /usr/local/bin/node "$(command -v node 2>/dev/null || true)"; do
-  if [[ -n "${candidate}" && -x "${candidate}" ]] && +    "${candidate}" -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'; then
+  if [[ -n "${candidate}" && -x "${candidate}" ]] && "${candidate}" -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'; then
     NODE_BIN="${candidate}"
     break
   fi
