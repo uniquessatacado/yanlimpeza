@@ -161,6 +161,7 @@ NPM_CONTAINER="$(find_npm_container || true)"
 NPM_CONTAINER_NAME=""
 NPM_DATA_HOST=""
 NPM_NETWORK_MODE=""
+NPM_NETWORK=""
 NPM_GATEWAY=""
 APP_BIND="127.0.0.1"
 
@@ -173,8 +174,9 @@ if [[ -n "${NPM_CONTAINER}" ]]; then
     fail "Não foi possível localizar os dados persistentes do Nginx Proxy Manager."
 
   if [[ "${NPM_NETWORK_MODE}" != "host" ]]; then
+    NPM_NETWORK="$(docker inspect --format '{{range $name, $settings := .NetworkSettings.Networks}}{{println $name}}{{end}}' "${NPM_CONTAINER}" | awk '$1 != "bridge" && $1 != "host" && $1 != "none" {print; exit}')"
     NPM_GATEWAY="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.Gateway}} {{end}}' "${NPM_CONTAINER}" | awk '{print $1}')"
-    [[ -n "${NPM_GATEWAY}" ]] || fail "Não foi possível localizar a rede do Nginx Proxy Manager."
+    [[ -n "${NPM_NETWORK}" && -n "${NPM_GATEWAY}" ]] || fail "Não foi possível localizar a rede do Nginx Proxy Manager."
     APP_BIND="${NPM_GATEWAY}"
   fi
 fi
@@ -230,6 +232,70 @@ if [[ "${APP_READY}" != "1" ]]; then
   fail "O aplicativo não iniciou corretamente."
 fi
 
+npm_http_get() {
+  local url="$1"
+  local host_header="${2:-}"
+  local insecure="${3:-0}"
+  docker exec "${NPM_CONTAINER_NAME}" sh -c '
+    url="$1"
+    host_header="$2"
+    insecure="$3"
+    if command -v curl >/dev/null 2>&1; then
+      if [ "${insecure}" = "1" ]; then
+        if [ -n "${host_header}" ]; then
+          exec curl -kfsS --max-time 15 -H "Host: ${host_header}" "${url}"
+        fi
+        exec curl -kfsS --max-time 15 "${url}"
+      fi
+      if [ -n "${host_header}" ]; then
+        exec curl -fsS --max-time 15 -H "Host: ${host_header}" "${url}"
+      fi
+      exec curl -fsS --max-time 15 "${url}"
+    fi
+    if command -v wget >/dev/null 2>&1; then
+      tls_option=""
+      [ "${insecure}" = "1" ] && tls_option="--no-check-certificate"
+      if [ -n "${host_header}" ]; then
+        exec wget -qO- ${tls_option} --timeout=15 --header="Host: ${host_header}" "${url}"
+      fi
+      exec wget -qO- ${tls_option} --timeout=15 "${url}"
+    fi
+    exit 127
+  ' sh "${url}" "${host_header}" "${insecure}"
+}
+
+NPM_UPSTREAM_HOST="${APP_BIND}"
+if [[ -n "${NPM_CONTAINER}" && "${NPM_NETWORK_MODE}" != "host" ]]; then
+  log "Conectando o sistema à rede do Nginx Proxy Manager"
+  RELEASE_SOURCE="$(readlink -f "${APP_ROOT}/current")"
+  docker pull node:22-bookworm-slim >/dev/null
+  docker rm -f yan-limpeza-app >/dev/null 2>&1 || true
+  docker run -d \
+    --name yan-limpeza-app \
+    --restart unless-stopped \
+    --network "${NPM_NETWORK}" \
+    --mount "type=bind,src=${RELEASE_SOURCE},dst=/app,readonly" \
+    --workdir /app \
+    --env NODE_ENV=production \
+    node:22-bookworm-slim \
+    node node_modules/vinext/dist/cli.js start --port "${APP_PORT}" --hostname 0.0.0.0 >/dev/null
+
+  NPM_UPSTREAM_HOST="yan-limpeza-app"
+  CONTAINER_READY="0"
+  for _ in $(seq 1 45); do
+    if npm_http_get "http://${NPM_UPSTREAM_HOST}:${APP_PORT}/" >/dev/null 2>&1; then
+      CONTAINER_READY="1"
+      break
+    fi
+    sleep 1
+  done
+  if [[ "${CONTAINER_READY}" != "1" ]]; then
+    docker logs --tail 80 yan-limpeza-app || true
+    fail "O aplicativo não iniciou na rede do Nginx Proxy Manager."
+  fi
+  systemctl disable --now yan-limpeza.service >/dev/null 2>&1 || true
+fi
+
 prepare_certbot() {
   local system_certbot certbot_venv
   system_certbot="$(command -v certbot 2>/dev/null || true)"
@@ -260,7 +326,6 @@ if [[ -n "${NPM_CONTAINER}" ]]; then
   NPM_VHOST_HOST="${NPM_PROXY_DIR_HOST}/99999-yan-limpeza.conf"
   NPM_ACME_HOST="${NPM_DATA_HOST}/yan-acme"
   NPM_SSL_HOST="${NPM_DATA_HOST}/yan-ssl"
-  NPM_UPSTREAM_HOST="${APP_BIND}"
   install -d "${NPM_PROXY_DIR_HOST}" "${NPM_ACME_HOST}/.well-known/acme-challenge" "${NPM_SSL_HOST}"
 
   cat > "${NPM_VHOST_HOST}" <<EOF
@@ -292,8 +357,9 @@ EOF
 
   PREFLIGHT_TOKEN="yan-preflight-${RELEASE_ID}"
   printf '%s\n' "${PREFLIGHT_TOKEN}" > "${NPM_ACME_HOST}/.well-known/acme-challenge/${PREFLIGHT_TOKEN}"
-  PREFLIGHT_RESPONSE="$(curl -fsS --max-time 10 --resolve "${DOMAIN}:80:127.0.0.1" \
-    "http://${DOMAIN}/.well-known/acme-challenge/${PREFLIGHT_TOKEN}" || true)"
+  PREFLIGHT_RESPONSE="$(npm_http_get \
+    "http://127.0.0.1/.well-known/acme-challenge/${PREFLIGHT_TOKEN}" \
+    "${DOMAIN}" || true)"
   rm -f -- "${NPM_ACME_HOST}/.well-known/acme-challenge/${PREFLIGHT_TOKEN}"
   [[ "${PREFLIGHT_RESPONSE}" == "${PREFLIGHT_TOKEN}" ]] || \
     fail "O Nginx Proxy Manager não publicou a rota de validação do HTTPS."
@@ -588,10 +654,18 @@ EOF
 systemctl daemon-reload
 systemctl enable --now yan-certbot-renew.timer
 
-curl -fsS --max-time 10 --resolve "${DOMAIN}:443:127.0.0.1" "https://${DOMAIN}/" >/dev/null
+if [[ -n "${NPM_CONTAINER}" ]]; then
+  npm_http_get "https://127.0.0.1/" "${DOMAIN}" "1" >/dev/null
+else
+  curl -fsS --max-time 10 --resolve "${DOMAIN}:443:127.0.0.1" "https://${DOMAIN}/" >/dev/null
+fi
 
 SWITCHED_RELEASE="0"
-systemctl is-active --quiet yan-limpeza.service
+if [[ -n "${NPM_CONTAINER}" && "${NPM_NETWORK_MODE}" != "host" ]]; then
+  [[ "$(docker inspect --format '{{.State.Running}}' yan-limpeza-app 2>/dev/null)" == "true" ]]
+else
+  systemctl is-active --quiet yan-limpeza.service
+fi
 
 printf '\n\033[1;32mYAN Limpeza instalada com sucesso.\033[0m\n'
 printf 'Site: https://%s\n' "${DOMAIN}"
