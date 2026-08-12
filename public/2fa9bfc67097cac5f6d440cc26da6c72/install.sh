@@ -136,6 +136,49 @@ runuser -u "${APP_USER}" -- env HOME="${APP_HOME}" PATH="${PATH}" \
 VINEXT_CLI="${RELEASE_DIR}/node_modules/vinext/dist/cli.js"
 [[ -f "${VINEXT_CLI}" ]] || fail "O inicializador do sistema não foi instalado."
 
+find_npm_container() {
+  command -v docker >/dev/null 2>&1 || return 1
+
+  local container_id image_name
+  while read -r container_id image_name; do
+    if [[ "${image_name,,}" == *"nginx-proxy-manager"* || "${image_name,,}" == *"nginxproxymanager"* ]]; then
+      printf '%s\n' "${container_id}"
+      return
+    fi
+  done < <(docker ps --format '{{.ID}} {{.Image}}')
+
+  while read -r container_id; do
+    if docker exec "${container_id}" sh -c 'test -d /data/nginx/proxy_host && command -v nginx >/dev/null 2>&1' >/dev/null 2>&1; then
+      printf '%s\n' "${container_id}"
+      return
+    fi
+  done < <(docker ps -q)
+
+  return 1
+}
+
+NPM_CONTAINER="$(find_npm_container || true)"
+NPM_CONTAINER_NAME=""
+NPM_DATA_HOST=""
+NPM_NETWORK_MODE=""
+NPM_GATEWAY=""
+APP_BIND="127.0.0.1"
+
+if [[ -n "${NPM_CONTAINER}" ]]; then
+  log "Nginx Proxy Manager detectado"
+  NPM_CONTAINER_NAME="$(docker inspect --format '{{.Name}}' "${NPM_CONTAINER}" | sed 's#^/##')"
+  NPM_DATA_HOST="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}' "${NPM_CONTAINER}")"
+  NPM_NETWORK_MODE="$(docker inspect --format '{{.HostConfig.NetworkMode}}' "${NPM_CONTAINER}")"
+  [[ -n "${NPM_CONTAINER_NAME}" && -n "${NPM_DATA_HOST}" && -d "${NPM_DATA_HOST}" ]] || \
+    fail "Não foi possível localizar os dados persistentes do Nginx Proxy Manager."
+
+  if [[ "${NPM_NETWORK_MODE}" != "host" ]]; then
+    NPM_GATEWAY="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.Gateway}} {{end}}' "${NPM_CONTAINER}" | awk '{print $1}')"
+    [[ -n "${NPM_GATEWAY}" ]] || fail "Não foi possível localizar a rede do Nginx Proxy Manager."
+    APP_BIND="${NPM_GATEWAY}"
+  fi
+fi
+
 ln -sfn "${RELEASE_DIR}" "${APP_ROOT}/current.next"
 mv -Tf "${APP_ROOT}/current.next" "${APP_ROOT}/current"
 SWITCHED_RELEASE="1"
@@ -155,7 +198,7 @@ WorkingDirectory=${APP_ROOT}/current
 Environment=NODE_ENV=production
 Environment=HOME=${APP_HOME}
 Environment=PATH=$(dirname "${NODE_BIN}"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=${NODE_BIN} ${APP_ROOT}/current/node_modules/vinext/dist/cli.js start --port ${APP_PORT} --hostname 127.0.0.1
+ExecStart=${NODE_BIN} ${APP_ROOT}/current/node_modules/vinext/dist/cli.js start --port ${APP_PORT} --hostname ${APP_BIND}
 Restart=always
 RestartSec=5
 TimeoutStopSec=20
@@ -175,7 +218,7 @@ systemctl restart yan-limpeza.service
 
 APP_READY="0"
 for _ in $(seq 1 45); do
-  if curl -fsS --max-time 3 "http://127.0.0.1:${APP_PORT}/" >/dev/null; then
+  if curl -fsS --max-time 3 "http://${APP_BIND}:${APP_PORT}/" >/dev/null; then
     APP_READY="1"
     break
   fi
@@ -186,6 +229,146 @@ if [[ "${APP_READY}" != "1" ]]; then
   journalctl -u yan-limpeza.service -n 80 --no-pager || true
   fail "O aplicativo não iniciou corretamente."
 fi
+
+prepare_certbot() {
+  local system_certbot certbot_venv
+  system_certbot="$(command -v certbot 2>/dev/null || true)"
+  if [[ -n "${system_certbot}" ]] && "${system_certbot}" --version >/dev/null 2>&1; then
+    CERTBOT_BIN="${system_certbot}"
+    return
+  fi
+
+  log "Preparando o certificado HTTPS"
+  certbot_venv="/opt/yan-certbot"
+  python3 -m venv "${certbot_venv}"
+  "${certbot_venv}/bin/python" -m pip install \
+    --disable-pip-version-check \
+    --no-cache-dir \
+    --upgrade pip setuptools wheel certbot
+  CERTBOT_BIN="${certbot_venv}/bin/certbot"
+  "${CERTBOT_BIN}" --version >/dev/null
+}
+
+CERTBOT_BIN=""
+prepare_certbot
+
+if [[ -n "${NPM_CONTAINER}" ]]; then
+  log "Configurando o domínio no Nginx Proxy Manager"
+  docker exec "${NPM_CONTAINER_NAME}" nginx -T 2>&1 | grep -F '/data/nginx/proxy_host/*.conf' >/dev/null || \
+    fail "A pasta de hosts do Nginx Proxy Manager não está ativa."
+  NPM_PROXY_DIR_HOST="${NPM_DATA_HOST}/nginx/proxy_host"
+  NPM_VHOST_HOST="${NPM_PROXY_DIR_HOST}/99999-yan-limpeza.conf"
+  NPM_ACME_HOST="${NPM_DATA_HOST}/yan-acme"
+  NPM_SSL_HOST="${NPM_DATA_HOST}/yan-ssl"
+  NPM_UPSTREAM_HOST="${APP_BIND}"
+  install -d "${NPM_PROXY_DIR_HOST}" "${NPM_ACME_HOST}/.well-known/acme-challenge" "${NPM_SSL_HOST}"
+
+  cat > "${NPM_VHOST_HOST}" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOMAIN};
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /data/yan-acme;
+        default_type text/plain;
+        try_files \$uri =404;
+    }
+
+    location / {
+        proxy_pass http://${NPM_UPSTREAM_HOST}:${APP_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 120s;
+    }
+}
+EOF
+
+  docker exec "${NPM_CONTAINER_NAME}" nginx -t
+  docker exec "${NPM_CONTAINER_NAME}" nginx -s reload
+
+  PREFLIGHT_TOKEN="yan-preflight-${RELEASE_ID}"
+  printf '%s\n' "${PREFLIGHT_TOKEN}" > "${NPM_ACME_HOST}/.well-known/acme-challenge/${PREFLIGHT_TOKEN}"
+  PREFLIGHT_RESPONSE="$(curl -fsS --max-time 10 --resolve "${DOMAIN}:80:127.0.0.1" \
+    "http://${DOMAIN}/.well-known/acme-challenge/${PREFLIGHT_TOKEN}" || true)"
+  rm -f -- "${NPM_ACME_HOST}/.well-known/acme-challenge/${PREFLIGHT_TOKEN}"
+  [[ "${PREFLIGHT_RESPONSE}" == "${PREFLIGHT_TOKEN}" ]] || \
+    fail "O Nginx Proxy Manager não publicou a rota de validação do HTTPS."
+
+  if [[ ! -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]]; then
+    log "Gerando o certificado HTTPS"
+    "${CERTBOT_BIN}" certonly \
+      --webroot \
+      --webroot-path "${NPM_ACME_HOST}" \
+      --domain "${DOMAIN}" \
+      --non-interactive \
+      --agree-tos \
+      --register-unsafely-without-email \
+      --preferred-challenges http
+  fi
+
+  [[ -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]] || fail "O certificado HTTPS não foi criado."
+  install -m 0644 "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" "${NPM_SSL_HOST}/fullchain.pem"
+  install -m 0600 "/etc/letsencrypt/live/${DOMAIN}/privkey.pem" "${NPM_SSL_HOST}/privkey.pem"
+
+  cat > "${NPM_VHOST_HOST}" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOMAIN};
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /data/yan-acme;
+        default_type text/plain;
+        try_files \$uri =404;
+    }
+
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name ${DOMAIN};
+
+    ssl_certificate /data/yan-ssl/fullchain.pem;
+    ssl_certificate_key /data/yan-ssl/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:YANSSL:10m;
+    ssl_session_timeout 1d;
+    client_max_body_size 20m;
+
+    location / {
+        proxy_pass http://${NPM_UPSTREAM_HOST}:${APP_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 120s;
+    }
+}
+EOF
+
+  docker exec "${NPM_CONTAINER_NAME}" nginx -t
+  docker exec "${NPM_CONTAINER_NAME}" nginx -s reload
+
+  install -d /etc/letsencrypt/renewal-hooks/deploy
+  cat > /etc/letsencrypt/renewal-hooks/deploy/reload-yan-nginx.sh <<EOF
+#!/usr/bin/env bash
+set -Eeuo pipefail
+install -m 0644 "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" "${NPM_SSL_HOST}/fullchain.pem"
+install -m 0600 "/etc/letsencrypt/live/${DOMAIN}/privkey.pem" "${NPM_SSL_HOST}/privkey.pem"
+docker exec "${NPM_CONTAINER_NAME}" nginx -t
+docker exec "${NPM_CONTAINER_NAME}" nginx -s reload
+EOF
+  chmod 755 /etc/letsencrypt/renewal-hooks/deploy/reload-yan-nginx.sh
+else
 
 find_nginx() {
   if command -v nginx >/dev/null 2>&1; then
@@ -312,28 +495,6 @@ log "Configurando o domínio"
 write_http_vhost
 reload_nginx
 
-prepare_certbot() {
-  local system_certbot certbot_venv
-  system_certbot="$(command -v certbot 2>/dev/null || true)"
-  if [[ -n "${system_certbot}" ]] && "${system_certbot}" --version >/dev/null 2>&1; then
-    CERTBOT_BIN="${system_certbot}"
-    return
-  fi
-
-  log "Preparando o certificado HTTPS"
-  certbot_venv="/opt/yan-certbot"
-  python3 -m venv "${certbot_venv}"
-  "${certbot_venv}/bin/python" -m pip install \
-    --disable-pip-version-check \
-    --no-cache-dir \
-    --upgrade pip setuptools wheel certbot
-  CERTBOT_BIN="${certbot_venv}/bin/certbot"
-  "${CERTBOT_BIN}" --version >/dev/null
-}
-
-CERTBOT_BIN=""
-prepare_certbot
-
 if [[ ! -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]]; then
   log "Gerando o certificado HTTPS"
   "${CERTBOT_BIN}" certonly \
@@ -399,6 +560,7 @@ set -e
 systemctl reload nginx 2>/dev/null || systemctl reload openresty 2>/dev/null || "${NGINX_BIN}" -s reload
 EOF
 chmod 755 /etc/letsencrypt/renewal-hooks/deploy/reload-yan-nginx.sh
+fi
 
 cat > /etc/systemd/system/yan-certbot-renew.service <<EOF
 [Unit]
