@@ -654,9 +654,7 @@ EOF
 systemctl daemon-reload
 systemctl enable --now yan-certbot-renew.timer
 
-if [[ -n "${NPM_CONTAINER}" ]]; then
-  npm_http_get "https://127.0.0.1/" "${DOMAIN}" "1" >/dev/null
-else
+if [[ -z "${NPM_CONTAINER}" ]]; then
   curl -fsS --max-time 10 --resolve "${DOMAIN}:443:127.0.0.1" "https://${DOMAIN}/" >/dev/null
 fi
 
