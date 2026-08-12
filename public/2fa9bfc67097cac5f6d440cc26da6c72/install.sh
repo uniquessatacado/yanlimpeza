@@ -90,12 +90,26 @@ install_node() {
     grep "  ${package}$" SHASUMS256.txt | sha256sum -c -
   )
   tar -xJf "${TMP_DIR}/${package}" -C /usr/local --strip-components=1
+  hash -r
 }
 
 install_node
-NODE_BIN="$(command -v node)"
+hash -r
+NODE_BIN=""
+for candidate in /usr/local/bin/node "$(command -v node 2>/dev/null || true)"; do
+  if [[ -n "${candidate}" && -x "${candidate}" ]] && +    "${candidate}" -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'; then
+    NODE_BIN="${candidate}"
+    break
+  fi
+done
+[[ -n "${NODE_BIN}" ]] || fail "O Node.js 22 não ficou disponível."
+
+export PATH="$(dirname "${NODE_BIN}"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+hash -r
 NPM_BIN="$(command -v npm)"
-[[ -x "${NODE_BIN}" && -x "${NPM_BIN}" ]] || fail "Node.js ou npm não ficaram disponíveis."
+NPM_CLI="$(readlink -f "${NPM_BIN}")"
+[[ -x "${NPM_BIN}" && -f "${NPM_CLI}" ]] || fail "O npm não ficou disponível."
+log "Usando $("${NODE_BIN}" --version)"
 
 if ! id "${APP_USER}" >/dev/null 2>&1; then
   useradd --system --create-home --home-dir "${APP_HOME}" --shell /usr/sbin/nologin "${APP_USER}"
@@ -115,10 +129,12 @@ tar -xzf "${TMP_DIR}/yan-limpeza.tar.gz" -C "${RELEASE_DIR}"
 chown -R "${APP_USER}:${APP_USER}" "${RELEASE_DIR}"
 
 log "Instalando os componentes do sistema"
-runuser -u "${APP_USER}" -- env HOME="${APP_HOME}" PATH="$(dirname "${NODE_BIN}"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-  bash -lc "cd '${RELEASE_DIR}' && '${NPM_BIN}' ci --include=dev --no-audit --no-fund"
+runuser -u "${APP_USER}" -- env HOME="${APP_HOME}" PATH="${PATH}" \
+  bash -c "cd '${RELEASE_DIR}' && exec '${NODE_BIN}' '${NPM_CLI}' ci --include=dev --no-audit --no-fund"
 
 [[ -f "${RELEASE_DIR}/dist/server/index.js" ]] || fail "O pacote não contém a versão compilada do sistema."
+VINEXT_CLI="${RELEASE_DIR}/node_modules/vinext/dist/cli.js"
+[[ -f "${VINEXT_CLI}" ]] || fail "O inicializador do sistema não foi instalado."
 
 ln -sfn "${RELEASE_DIR}" "${APP_ROOT}/current.next"
 mv -Tf "${APP_ROOT}/current.next" "${APP_ROOT}/current"
@@ -138,7 +154,8 @@ Group=${APP_USER}
 WorkingDirectory=${APP_ROOT}/current
 Environment=NODE_ENV=production
 Environment=HOME=${APP_HOME}
-ExecStart=${NPM_BIN} start -- --port ${APP_PORT} --hostname 127.0.0.1
+Environment=PATH=$(dirname "${NODE_BIN}"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=${NODE_BIN} ${APP_ROOT}/current/node_modules/vinext/dist/cli.js start --port ${APP_PORT} --hostname 127.0.0.1
 Restart=always
 RestartSec=5
 TimeoutStopSec=20
@@ -200,6 +217,18 @@ NGINX_VERSION_ARGS="$("${NGINX_BIN}" -V 2>&1 || true)"
 NGINX_PREFIX="$(printf '%s\n' "${NGINX_VERSION_ARGS}" | sed -n 's/.*--prefix=\([^ ]*\).*/\1/p')"
 NGINX_PREFIX="${NGINX_PREFIX:-/usr/local/openresty/nginx}"
 NGINX_DUMP="$("${NGINX_BIN}" -T 2>&1 || true)"
+NGINX_PID_FILE="$(printf '%s\n' "${NGINX_DUMP}" | awk '
+  /^[[:space:]]*pid[[:space:]]+/ {
+    p=$2
+    gsub(/;/, "", p)
+    print p
+    exit
+  }
+')"
+NGINX_PID_FILE="${NGINX_PID_FILE:-/run/nginx.pid}"
+if [[ "${NGINX_PID_FILE}" != /* ]]; then
+  NGINX_PID_FILE="${NGINX_PREFIX%/}/${NGINX_PID_FILE}"
+fi
 
 choose_vhost_dir() {
   local pattern
@@ -261,9 +290,22 @@ EOF
 
 reload_nginx() {
   "${NGINX_BIN}" -t
-  systemctl reload nginx 2>/dev/null || \
-    systemctl reload openresty 2>/dev/null || \
+  if systemctl is-active --quiet nginx 2>/dev/null && systemctl reload nginx 2>/dev/null; then
+    return
+  fi
+  if systemctl is-active --quiet openresty 2>/dev/null && systemctl reload openresty 2>/dev/null; then
+    return
+  fi
+
+  local master_pid
+  master_pid="$(pgrep -xo nginx || pgrep -xo openresty || true)"
+  if [[ -n "${master_pid}" ]]; then
+    install -d "$(dirname "${NGINX_PID_FILE}")"
+    printf '%s\n' "${master_pid}" > "${NGINX_PID_FILE}"
     "${NGINX_BIN}" -s reload
+  else
+    "${NGINX_BIN}"
+  fi
 }
 
 log "Configurando o domínio"
