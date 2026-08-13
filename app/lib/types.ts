@@ -13,6 +13,7 @@ export type Service = {
   description: string | null;
   active: boolean;
   sort_order: number;
+  default_return_preset_id: string | null;
   options?: ServiceOption[];
 };
 
@@ -25,6 +26,16 @@ export type ServiceOption = {
   cost_price: number | null;
   duration_minutes: number;
   return_months: number;
+  return_preset_id: string | null;
+  active: boolean;
+  sort_order: number;
+};
+
+export type ReturnPreset = {
+  id: string;
+  label: string;
+  value: number;
+  unit: "days" | "months";
   active: boolean;
   sort_order: number;
 };
@@ -67,8 +78,20 @@ export type OrderItem = {
   discount_amount: number;
   line_total: number;
   duration_minutes: number;
+  width_m: number | null;
+  length_m: number | null;
   service?: Pick<Service, "id" | "name">;
   option?: Pick<ServiceOption, "id" | "name"> | null;
+};
+
+export type OrderPhoto = {
+  id: string;
+  order_id: string;
+  phase: "before" | "after";
+  storage_path: string;
+  caption: string | null;
+  sort_order: number;
+  created_at: string;
 };
 
 export type Order = {
@@ -84,6 +107,10 @@ export type Order = {
   neighborhood: string | null;
   city: string | null;
   state: string | null;
+  zipcode: string | null;
+  return_value: number | null;
+  return_unit: "days" | "months" | null;
+  return_label: string | null;
   subtotal: number;
   item_discount_total: number;
   discount_type: "fixed" | "percent";
@@ -97,6 +124,20 @@ export type Order = {
   created_at: string;
   client?: Client;
   items?: OrderItem[];
+  photos?: OrderPhoto[];
+};
+
+export type YanSettings = {
+  id: string;
+  business_name: string;
+  whatsapp: string;
+  city: string;
+  state: string;
+  default_return_months: number;
+  default_payment_days: number;
+  warranty_value: number;
+  warranty_unit: "days" | "months";
+  warranty_notes: string;
 };
 
 export type Receivable = {
