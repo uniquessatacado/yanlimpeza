@@ -612,6 +612,17 @@ body { font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Se
 
 /* Stable mobile workflows, visual scheduling, photos, returns and warranty */
 html, body { max-width: 100%; overflow-x: hidden; }
+html.modal-scroll-locked,
+html.modal-scroll-locked body,
+body.modal-scroll-locked {
+  overflow: hidden !important;
+  overscroll-behavior: none !important;
+}
+body.modal-scroll-locked {
+  position: fixed !important;
+  inset-inline: 0 !important;
+  width: 100% !important;
+}
 .modal-backdrop { width: 100%; height: 100dvh; overflow: hidden; overscroll-behavior: contain; }
 .modal-panel {
   min-width: 0;
@@ -628,7 +639,10 @@ html, body { max-width: 100%; overflow-x: hidden; }
   overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
 }
+.modal-backdrop { touch-action: none; }
+.modal-panel { touch-action: pan-y; }
 .modal-panel *, .modal-form label, .form-grid > *, .wizard-step > * { min-width: 0; box-sizing: border-box; }
 .modal-form input, .modal-form select, .modal-form textarea,
 .settings-form input, .settings-form select, .settings-form textarea {

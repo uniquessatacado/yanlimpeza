@@ -5,7 +5,7 @@ import {
   Clock3, FileDown, History, House, Loader2, MapPin, MessageCircle, Pencil, Plus,
   Save, Send, Sparkles, Trash2, UserPlus, UserRound, X,
 } from "lucide-react";
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, ReactNode, useLayoutEffect, useMemo, useState } from "react";
 import { dateTime, digits, money, todayIso } from "../lib/format";
 import { deliverOrderPdf } from "../lib/order-pdf";
 import { supabase } from "../lib/supabase";
@@ -13,8 +13,86 @@ import type { Client, Order, Receivable, ReturnPreset, Service, ServiceOption, Y
 import { findClientByWhatsapp, uploadOrderPhotos, type AddressDraft } from "../lib/workflow";
 import { AddressFields, PhotoPicker, WhatsappField, WizardProgress } from "./wizard-fields";
 
+type ScrollLockSnapshot = {
+  x: number;
+  y: number;
+  html: { overflow: string; overscrollBehavior: string; scrollBehavior: string };
+  body: { overflow: string; overscrollBehavior: string; position: string; top: string; left: string; right: string; width: string; paddingRight: string };
+};
+
+let openModalCount = 0;
+let scrollLockSnapshot: ScrollLockSnapshot | null = null;
+
+function lockPageBehindModal() {
+  openModalCount += 1;
+  if (openModalCount > 1) return;
+
+  const html = document.documentElement;
+  const body = document.body;
+  const scrollbarWidth = Math.max(0, window.innerWidth - html.clientWidth);
+  scrollLockSnapshot = {
+    x: window.scrollX,
+    y: window.scrollY,
+    html: {
+      overflow: html.style.overflow,
+      overscrollBehavior: html.style.overscrollBehavior,
+      scrollBehavior: html.style.scrollBehavior,
+    },
+    body: {
+      overflow: body.style.overflow,
+      overscrollBehavior: body.style.overscrollBehavior,
+      position: body.style.position,
+      top: body.style.top,
+      left: body.style.left,
+      right: body.style.right,
+      width: body.style.width,
+      paddingRight: body.style.paddingRight,
+    },
+  };
+
+  html.classList.add("modal-scroll-locked");
+  body.classList.add("modal-scroll-locked");
+  html.style.overflow = "hidden";
+  html.style.overscrollBehavior = "none";
+  body.style.overflow = "hidden";
+  body.style.overscrollBehavior = "none";
+  body.style.position = "fixed";
+  body.style.top = `-${scrollLockSnapshot.y}px`;
+  body.style.left = "0";
+  body.style.right = "0";
+  body.style.width = "100%";
+  if (scrollbarWidth > 0) body.style.paddingRight = `${scrollbarWidth}px`;
+}
+
+function unlockPageBehindModal() {
+  openModalCount = Math.max(0, openModalCount - 1);
+  if (openModalCount > 0 || !scrollLockSnapshot) return;
+
+  const snapshot = scrollLockSnapshot;
+  scrollLockSnapshot = null;
+  const html = document.documentElement;
+  const body = document.body;
+
+  html.classList.remove("modal-scroll-locked");
+  body.classList.remove("modal-scroll-locked");
+  html.style.overflow = snapshot.html.overflow;
+  html.style.overscrollBehavior = snapshot.html.overscrollBehavior;
+  body.style.overflow = snapshot.body.overflow;
+  body.style.overscrollBehavior = snapshot.body.overscrollBehavior;
+  body.style.position = snapshot.body.position;
+  body.style.top = snapshot.body.top;
+  body.style.left = snapshot.body.left;
+  body.style.right = snapshot.body.right;
+  body.style.width = snapshot.body.width;
+  body.style.paddingRight = snapshot.body.paddingRight;
+
+  html.style.scrollBehavior = "auto";
+  window.scrollTo(snapshot.x, snapshot.y);
+  html.style.scrollBehavior = snapshot.html.scrollBehavior;
+}
+
 export function Modal({ title, subtitle, children, onClose, wide = false, panelClassName = "" }: { title: string; subtitle?: string; children: ReactNode; onClose: () => void; wide?: boolean; panelClassName?: string }) {
-  useEffect(() => { const previous = document.body.style.overflow; document.body.style.overflow = "hidden"; return () => { document.body.style.overflow = previous; }; }, []);
+  useLayoutEffect(() => { lockPageBehindModal(); return unlockPageBehindModal; }, []);
   const classes = ["modal-panel", wide ? "modal-wide" : "", panelClassName].filter(Boolean).join(" ");
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className={classes} role="dialog" aria-modal="true" aria-label={title}><header className="modal-header"><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div><button className="icon-button" onClick={onClose} aria-label="Fechar"><X /></button></header>{children}</section></div>;
 }
