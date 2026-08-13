@@ -1,0 +1,20 @@
+{
+  "name": "Yan Limpeza — Gestão de Serviços",
+  "short_name": "Yan Limpeza",
+  "description": "Clientes, agenda, ordens de serviço e financeiro da Yan Limpeza.",
+  "start_url": "/app",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f3f6fa",
+  "theme_color": "#071a33",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/yan-logo.jpeg",
+      "sizes": "any",
+      "type": "image/jpeg",
+      "purpose": "any maskable"
+    }
+  ]
+}
+

@@ -29,6 +29,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
@@ -40,3 +41,6 @@ next-env.d.ts
 /.sites-runtime/
 /outputs/
 /work/
+
+# pacote gerado do atualizador
+/public/2fa9bfc67097cac5f6d440cc26da6c72/yan-limpeza.tar.gz
