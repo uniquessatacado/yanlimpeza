@@ -890,10 +890,13 @@ body.modal-scroll-locked {
 }
 
 .auth-brand,
-.auth-card,
-.back-to-site {
+.auth-card {
   position: relative;
   z-index: 1;
+}
+
+.back-to-site {
+  z-index: 2;
 }
 
 .auth-card {
