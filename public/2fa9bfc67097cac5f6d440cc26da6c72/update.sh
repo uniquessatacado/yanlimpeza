@@ -6,7 +6,7 @@ APP_USER="yanapp"
 APP_ROOT="/opt/yan-limpeza"
 APP_HOME="/var/lib/yan-limpeza"
 APP_PORT="3107"
-APP_VERSION="22"
+APP_VERSION="23"
 REPO_URL="https://github.com/uniquessatacado/yanlimpeza.git"
 SOURCE_REF="main"
 TMP_DIR="$(mktemp -d)"
@@ -15,6 +15,10 @@ RELEASE_DIR="${APP_ROOT}/releases/${RELEASE_ID}"
 PREVIOUS_RELEASE=""
 SWITCHED_RELEASE="0"
 DEPLOY_COMMIT=""
+DOCKER_MODE="0"
+DOCKER_NETWORK=""
+DOCKER_IMAGE="node:22-bookworm-slim"
+PROXY_CONTAINER=""
 
 log() {
   printf '\n\033[1;34m[YAN]\033[0m %s\n' "$*"
@@ -31,6 +35,42 @@ cleanup() {
   fi
 }
 
+find_proxy_container() {
+  command -v docker >/dev/null 2>&1 || return 1
+  local container_id image_name
+  while read -r container_id image_name; do
+    if [[ "${image_name,,}" == *"nginx-proxy-manager"* || "${image_name,,}" == *"nginxproxymanager"* ]]; then
+      printf '%s\n' "${container_id}"
+      return
+    fi
+  done < <(docker ps --format '{{.ID}} {{.Image}}')
+  while read -r container_id; do
+    if docker exec "${container_id}" sh -c 'test -d /data/nginx/proxy_host && command -v nginx >/dev/null 2>&1' >/dev/null 2>&1; then
+      printf '%s\n' "${container_id}"
+      return
+    fi
+  done < <(docker ps -q)
+  return 1
+}
+
+start_docker_release() {
+  local release="$1"
+  docker rm -f yan-limpeza-app >/dev/null 2>&1 || true
+  docker run -d \
+    --name yan-limpeza-app \
+    --restart unless-stopped \
+    --network "${DOCKER_NETWORK}" \
+    --mount "type=bind,src=${release},dst=/app,readonly" \
+    --workdir /app \
+    --env NODE_ENV=production \
+    "${DOCKER_IMAGE}" \
+    node node_modules/vinext/dist/cli.js start --port "${APP_PORT}" --hostname 0.0.0.0 >/dev/null
+  if [[ -n "${PROXY_CONTAINER}" ]]; then
+    docker exec "${PROXY_CONTAINER}" nginx -t >/dev/null
+    docker exec "${PROXY_CONTAINER}" nginx -s reload >/dev/null
+  fi
+}
+
 rollback() {
   local line="$1"
   trap - ERR
@@ -39,7 +79,11 @@ rollback() {
   if [[ "${SWITCHED_RELEASE}" == "1" && -n "${PREVIOUS_RELEASE}" && -d "${PREVIOUS_RELEASE}" ]]; then
     ln -sfn "${PREVIOUS_RELEASE}" "${APP_ROOT}/current.rollback"
     mv -Tf "${APP_ROOT}/current.rollback" "${APP_ROOT}/current"
-    systemctl restart yan-limpeza.service || true
+    if [[ "${DOCKER_MODE}" == "1" ]]; then
+      start_docker_release "${PREVIOUS_RELEASE}" || true
+    else
+      systemctl restart yan-limpeza.service || true
+    fi
     printf 'A versão anterior foi restaurada automaticamente.\n' >&2
   fi
   printf 'A versão que já estava no ar foi preservada.\n' >&2
@@ -53,6 +97,17 @@ trap cleanup EXIT
 [[ -L "${APP_ROOT}/current" && -f "${APP_ROOT}/current/package.json" ]] || fail "A instalação atual do YAN Limpeza não foi encontrada."
 id "${APP_USER}" >/dev/null 2>&1 || fail "O usuário interno do aplicativo não foi encontrado."
 command -v git >/dev/null 2>&1 || fail "O Git não foi encontrado no servidor."
+
+if command -v docker >/dev/null 2>&1 && docker inspect yan-limpeza-app >/dev/null 2>&1; then
+  DOCKER_MODE="1"
+  DOCKER_NETWORK="$(docker inspect --format '{{range $name, $settings := .NetworkSettings.Networks}}{{println $name}}{{end}}' yan-limpeza-app | awk '$1 != "bridge" && $1 != "host" && $1 != "none" {print; exit}')"
+  DOCKER_IMAGE="$(docker inspect --format '{{.Config.Image}}' yan-limpeza-app)"
+  PROXY_CONTAINER="$(find_proxy_container || true)"
+  [[ -n "${DOCKER_NETWORK}" ]] || fail "Não foi possível identificar a rede Docker do aplicativo."
+  [[ -n "${DOCKER_IMAGE}" ]] || fail "Não foi possível identificar a imagem Docker do aplicativo."
+  [[ -n "${PROXY_CONTAINER}" ]] || fail "Não foi possível identificar o Nginx Proxy Manager."
+  log "Modo Docker detectado; o contêiner e o proxy serão atualizados"
+fi
 
 NODE_BIN="$(command -v node || true)"
 [[ -n "${NODE_BIN}" ]] || fail "O Node.js não foi encontrado."
@@ -100,12 +155,23 @@ log "Ativando a nova versão"
 ln -sfn "${RELEASE_DIR}" "${APP_ROOT}/current.next"
 mv -Tf "${APP_ROOT}/current.next" "${APP_ROOT}/current"
 SWITCHED_RELEASE="1"
-systemctl restart yan-limpeza.service
+if [[ "${DOCKER_MODE}" == "1" ]]; then
+  systemctl stop yan-limpeza.service >/dev/null 2>&1 || true
+  start_docker_release "${RELEASE_DIR}"
+else
+  systemctl restart yan-limpeza.service
+fi
 
 ready="0"
 stable_checks="0"
 for _ in $(seq 1 30); do
-  if systemctl is-active --quiet yan-limpeza.service; then
+  if [[ "${DOCKER_MODE}" == "1" ]]; then
+    if [[ "$(docker inspect --format '{{.State.Running}}' yan-limpeza-app 2>/dev/null || true)" == "true" ]] && \
+      docker exec yan-limpeza-app node -e "fetch('http://127.0.0.1:${APP_PORT}/app').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))" >/dev/null 2>&1; then
+      ready="1"
+      break
+    fi
+  elif systemctl is-active --quiet yan-limpeza.service; then
     main_pid="$(systemctl show -p MainPID --value yan-limpeza.service 2>/dev/null || true)"
     if [[ "${main_pid}" =~ ^[0-9]+$ ]] && [[ "${main_pid}" -gt 0 ]] && kill -0 "${main_pid}" 2>/dev/null; then
       if command -v ss >/dev/null 2>&1; then
@@ -130,7 +196,11 @@ for _ in $(seq 1 30); do
 done
 
 if [[ "${ready}" != "1" ]]; then
-  journalctl -u yan-limpeza.service -n 100 --no-pager || true
+  if [[ "${DOCKER_MODE}" == "1" ]]; then
+    docker logs --tail 100 yan-limpeza-app || true
+  else
+    journalctl -u yan-limpeza.service -n 100 --no-pager || true
+  fi
   fail "A nova versão não iniciou corretamente."
 fi
 
