@@ -6,17 +6,15 @@ APP_USER="yanapp"
 APP_ROOT="/opt/yan-limpeza"
 APP_HOME="/var/lib/yan-limpeza"
 APP_PORT="3107"
-APP_VERSION="12"
-PACKAGE_URL="https://yan-limpeza.clovispsilva.chatgpt.site/2fa9bfc67097cac5f6d440cc26da6c72/yan-limpeza.tar.gz"
-PACKAGE_SHA256="e301ebfa10bcb80d4b8741dcf340f7c8e3c97caa9f2465b82d2c52eccf89f231"
+APP_VERSION="16"
+REPO_URL="https://github.com/uniquessatacado/yanlimpeza.git"
+SOURCE_REF="main"
 TMP_DIR="$(mktemp -d)"
 RELEASE_ID="$(date -u +%Y%m%d%H%M%S)"
 RELEASE_DIR="${APP_ROOT}/releases/${RELEASE_ID}"
 PREVIOUS_RELEASE=""
 SWITCHED_RELEASE="0"
-DOCKER_MODE="0"
-DOCKER_NETWORK=""
-DOCKER_IMAGE="node:22-bookworm-slim"
+DEPLOY_COMMIT=""
 
 log() {
   printf '\n\033[1;34m[YAN]\033[0m %s\n' "$*"
@@ -33,34 +31,6 @@ cleanup() {
   fi
 }
 
-start_docker_release() {
-  local source_dir="$1"
-  docker rm -f yan-limpeza-app >/dev/null 2>&1 || true
-  docker run -d \
-    --name yan-limpeza-app \
-    --restart unless-stopped \
-    --network "${DOCKER_NETWORK}" \
-    --mount "type=bind,src=${source_dir},dst=/app,readonly" \
-    --workdir /app \
-    --env NODE_ENV=production \
-    "${DOCKER_IMAGE}" \
-    node node_modules/vinext/dist/cli.js start --port "${APP_PORT}" --hostname 0.0.0.0 >/dev/null
-}
-
-wait_for_docker() {
-  local ready="0"
-  for _ in $(seq 1 60); do
-    if docker exec yan-limpeza-app node -e \
-      "fetch('http://127.0.0.1:${APP_PORT}/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" \
-      >/dev/null 2>&1; then
-      ready="1"
-      break
-    fi
-    sleep 1
-  done
-  [[ "${ready}" == "1" ]]
-}
-
 rollback() {
   local line="$1"
   trap - ERR
@@ -69,15 +39,10 @@ rollback() {
   if [[ "${SWITCHED_RELEASE}" == "1" && -n "${PREVIOUS_RELEASE}" && -d "${PREVIOUS_RELEASE}" ]]; then
     ln -sfn "${PREVIOUS_RELEASE}" "${APP_ROOT}/current.rollback"
     mv -Tf "${APP_ROOT}/current.rollback" "${APP_ROOT}/current"
-    if [[ "${DOCKER_MODE}" == "1" ]]; then
-      start_docker_release "${PREVIOUS_RELEASE}"
-      wait_for_docker
-    else
-      systemctl restart yan-limpeza.service
-    fi
+    systemctl restart yan-limpeza.service || true
     printf 'A versão anterior foi restaurada automaticamente.\n' >&2
   fi
-  printf 'Envie uma foto deste erro para o Codex.\n' >&2
+  printf 'A versão que já estava no ar foi preservada.\n' >&2
   exit 1
 }
 
@@ -85,71 +50,76 @@ trap 'rollback $LINENO' ERR
 trap cleanup EXIT
 
 [[ "${EUID}" -eq 0 ]] || fail "Execute este comando como root."
-[[ -L "${APP_ROOT}/current" && -f "${APP_ROOT}/current/package.json" ]] || \
-  fail "A instalação atual do YAN Limpeza não foi encontrada."
+[[ -L "${APP_ROOT}/current" && -f "${APP_ROOT}/current/package.json" ]] || fail "A instalação atual do YAN Limpeza não foi encontrada."
 id "${APP_USER}" >/dev/null 2>&1 || fail "O usuário interno do aplicativo não foi encontrado."
+command -v git >/dev/null 2>&1 || fail "O Git não foi encontrado no servidor."
 
 NODE_BIN="$(command -v node || true)"
 [[ -n "${NODE_BIN}" ]] || fail "O Node.js não foi encontrado."
-"${NODE_BIN}" -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' || \
-  fail "É necessário ter o Node.js 22 ou superior."
+"${NODE_BIN}" -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' || fail "É necessário ter o Node.js 22 ou superior."
 NPM_BIN="$(command -v npm || true)"
 NPM_CLI="$(readlink -f "${NPM_BIN}")"
 [[ -n "${NPM_BIN}" && -f "${NPM_CLI}" ]] || fail "O npm não foi encontrado."
 
 PREVIOUS_RELEASE="$(readlink -f "${APP_ROOT}/current")"
 
-if command -v docker >/dev/null 2>&1 && docker inspect yan-limpeza-app >/dev/null 2>&1; then
-  DOCKER_MODE="1"
-  DOCKER_NETWORK="$(docker inspect --format '{{.HostConfig.NetworkMode}}' yan-limpeza-app)"
-  DOCKER_IMAGE="$(docker inspect --format '{{.Config.Image}}' yan-limpeza-app)"
-  [[ -n "${DOCKER_NETWORK}" && -n "${DOCKER_IMAGE}" ]] || \
-    fail "Não foi possível identificar a rede do aplicativo."
-fi
+log "Buscando a versão mais recente no GitHub"
+mkdir -p "${TMP_DIR}/source"
+git -C "${TMP_DIR}/source" init -q
+git -C "${TMP_DIR}/source" remote add origin "${REPO_URL}"
+git -C "${TMP_DIR}/source" fetch --depth 1 origin "${SOURCE_REF}"
+git -C "${TMP_DIR}/source" checkout -q --detach FETCH_HEAD
+DEPLOY_COMMIT="$(git -C "${TMP_DIR}/source" rev-parse HEAD)"
+printf 'Commit: %s\n' "${DEPLOY_COMMIT}"
 
-log "Baixando a atualização ${APP_VERSION}"
-curl -fsSL --retry 4 --retry-delay 2 -o "${TMP_DIR}/yan-limpeza.tar.gz" "${PACKAGE_URL}"
-printf '%s  %s\n' "${PACKAGE_SHA256}" "${TMP_DIR}/yan-limpeza.tar.gz" | sha256sum -c -
-
+log "Preparando a nova release"
 install -d "${RELEASE_DIR}"
-tar -xzf "${TMP_DIR}/yan-limpeza.tar.gz" -C "${RELEASE_DIR}"
+cp -a "${TMP_DIR}/source/." "${RELEASE_DIR}/"
+rm -rf "${RELEASE_DIR}/.git"
+
+# Mantém as configurações privadas já existentes no servidor.
+for env_file in .env .env.local .env.production .env.production.local; do
+  if [[ -f "${PREVIOUS_RELEASE}/${env_file}" ]]; then
+    cp -a "${PREVIOUS_RELEASE}/${env_file}" "${RELEASE_DIR}/${env_file}"
+  fi
+done
+
 chown -R "${APP_USER}:${APP_USER}" "${RELEASE_DIR}"
 
 log "Instalando os componentes"
 runuser -u "${APP_USER}" -- env HOME="${APP_HOME}" PATH="${PATH}" \
   bash -c "cd '${RELEASE_DIR}' && exec '${NODE_BIN}' '${NPM_CLI}' ci --include=dev --no-audit --no-fund"
 
-[[ -f "${RELEASE_DIR}/dist/server/index.js" ]] || fail "A versão compilada não veio no pacote."
-[[ -f "${RELEASE_DIR}/node_modules/vinext/dist/cli.js" ]] || fail "O inicializador não foi instalado."
+log "Compilando a versão ${APP_VERSION}"
+runuser -u "${APP_USER}" -- env HOME="${APP_HOME}" PATH="${PATH}" \
+  bash -c "cd '${RELEASE_DIR}' && exec '${NODE_BIN}' '${NPM_CLI}' run build"
 
+[[ -f "${RELEASE_DIR}/dist/server/index.js" ]] || fail "O build não gerou dist/server/index.js."
+[[ -f "${RELEASE_DIR}/node_modules/vinext/dist/cli.js" ]] || fail "O inicializador do Vinext não foi instalado."
+
+log "Ativando a nova versão"
 ln -sfn "${RELEASE_DIR}" "${APP_ROOT}/current.next"
 mv -Tf "${APP_ROOT}/current.next" "${APP_ROOT}/current"
 SWITCHED_RELEASE="1"
+systemctl restart yan-limpeza.service
 
-log "Iniciando a nova versão"
-if [[ "${DOCKER_MODE}" == "1" ]]; then
-  start_docker_release "${RELEASE_DIR}"
-  if ! wait_for_docker; then
-    docker logs --tail 100 yan-limpeza-app || true
-    fail "A nova versão não iniciou corretamente."
+ready="0"
+for _ in $(seq 1 60); do
+  if curl -fsS --max-time 3 "http://127.0.0.1:${APP_PORT}/" >/dev/null 2>&1; then
+    ready="1"
+    break
   fi
-else
-  systemctl restart yan-limpeza.service
-  ready="0"
-  for _ in $(seq 1 60); do
-    if curl -fsS --max-time 3 "http://127.0.0.1:${APP_PORT}/" >/dev/null 2>&1; then
-      ready="1"
-      break
-    fi
-    sleep 1
-  done
-  if [[ "${ready}" != "1" ]]; then
-    journalctl -u yan-limpeza.service -n 100 --no-pager || true
-    fail "A nova versão não iniciou corretamente."
-  fi
+  sleep 1
+done
+
+if [[ "${ready}" != "1" ]]; then
+  journalctl -u yan-limpeza.service -n 100 --no-pager || true
+  fail "A nova versão não iniciou corretamente."
 fi
 
 SWITCHED_RELEASE="0"
 printf '\n\033[1;32mYAN Limpeza atualizado com sucesso.\033[0m\n'
 printf 'Versão: %s\n' "${APP_VERSION}"
+printf 'Commit: %s\n' "${DEPLOY_COMMIT}"
+printf 'Release: %s\n' "${RELEASE_DIR}"
 printf 'Site: https://yanlimpeza.venduss.com\n'
