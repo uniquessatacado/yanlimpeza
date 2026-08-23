@@ -6,7 +6,7 @@ APP_USER="yanapp"
 APP_ROOT="/opt/yan-limpeza"
 APP_HOME="/var/lib/yan-limpeza"
 APP_PORT="3107"
-APP_VERSION="23"
+APP_VERSION="24"
 REPO_URL="https://github.com/uniquessatacado/yanlimpeza.git"
 SOURCE_REF="main"
 TMP_DIR="$(mktemp -d)"
@@ -55,6 +55,14 @@ find_proxy_container() {
 
 start_docker_release() {
   local release="$1"
+  local env_file
+  local -a env_args=()
+  for env_file in .env .env.local .env.production .env.production.local; do
+    if [[ -f "${release}/${env_file}" ]]; then
+      env_args+=(--env-file "${release}/${env_file}")
+    fi
+  done
+  [[ "${#env_args[@]}" -gt 0 ]] || return 1
   docker rm -f yan-limpeza-app >/dev/null 2>&1 || true
   docker run -d \
     --name yan-limpeza-app \
@@ -62,6 +70,7 @@ start_docker_release() {
     --network "${DOCKER_NETWORK}" \
     --mount "type=bind,src=${release},dst=/app,readonly" \
     --workdir /app \
+    "${env_args[@]}" \
     --env NODE_ENV=production \
     "${DOCKER_IMAGE}" \
     node node_modules/vinext/dist/cli.js start --port "${APP_PORT}" --hostname 0.0.0.0 >/dev/null
@@ -201,7 +210,8 @@ if [[ "${ready}" != "1" ]]; then
   else
     journalctl -u yan-limpeza.service -n 100 --no-pager || true
   fi
-  fail "A nova versão não iniciou corretamente."
+  printf '\n\033[1;31m[ERRO]\033[0m A nova versão não iniciou corretamente.\n' >&2
+  rollback "${LINENO}"
 fi
 
 SWITCHED_RELEASE="0"
