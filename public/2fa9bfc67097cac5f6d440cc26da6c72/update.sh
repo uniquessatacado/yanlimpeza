@@ -6,7 +6,7 @@ APP_USER="yanapp"
 APP_ROOT="/opt/yan-limpeza"
 APP_HOME="/var/lib/yan-limpeza"
 APP_PORT="3107"
-APP_VERSION="17"
+APP_VERSION="18"
 REPO_URL="https://github.com/uniquessatacado/yanlimpeza.git"
 SOURCE_REF="main"
 TMP_DIR="$(mktemp -d)"
@@ -77,7 +77,6 @@ install -d "${RELEASE_DIR}"
 cp -a "${TMP_DIR}/source/." "${RELEASE_DIR}/"
 rm -rf "${RELEASE_DIR}/.git"
 
-# Mantém as configurações privadas já existentes no servidor.
 for env_file in .env .env.local .env.production .env.production.local; do
   if [[ -f "${PREVIOUS_RELEASE}/${env_file}" ]]; then
     cp -a "${PREVIOUS_RELEASE}/${env_file}" "${RELEASE_DIR}/${env_file}"
@@ -103,20 +102,30 @@ mv -Tf "${APP_ROOT}/current.next" "${APP_ROOT}/current"
 SWITCHED_RELEASE="1"
 systemctl restart yan-limpeza.service
 
+# Valida o próprio serviço/processo em vez de assumir um IP específico.
 ready="0"
-for _ in $(seq 1 60); do
-  if ! systemctl is-active --quiet yan-limpeza.service; then
-    sleep 1
-    continue
-  fi
-
-  # O serviço deste servidor escuta em 10.0.3.1. Também testamos loopback
-  # para manter compatibilidade caso a configuração do systemd mude no futuro.
-  if curl -fsS --max-time 3 "http://10.0.3.1:${APP_PORT}/" >/dev/null 2>&1 || \
-     curl -fsS --max-time 3 "http://127.0.0.1:${APP_PORT}/" >/dev/null 2>&1 || \
-     curl -fsS --max-time 3 "http://localhost:${APP_PORT}/" >/dev/null 2>&1; then
-    ready="1"
-    break
+stable_checks="0"
+for _ in $(seq 1 30); do
+  if systemctl is-active --quiet yan-limpeza.service; then
+    main_pid="$(systemctl show -p MainPID --value yan-limpeza.service 2>/dev/null || true)"
+    if [[ "${main_pid}" =~ ^[0-9]+$ ]] && [[ "${main_pid}" -gt 0 ]] && kill -0 "${main_pid}" 2>/dev/null; then
+      if command -v ss >/dev/null 2>&1; then
+        if ss -ltn 2>/dev/null | grep -Eq "LISTEN[[:space:]].*:${APP_PORT}([[:space:]]|$)"; then
+          ready="1"
+          break
+        fi
+      else
+        stable_checks=$((stable_checks + 1))
+        if [[ "${stable_checks}" -ge 3 ]]; then
+          ready="1"
+          break
+        fi
+      fi
+    else
+      stable_checks="0"
+    fi
+  else
+    stable_checks="0"
   fi
   sleep 1
 done
