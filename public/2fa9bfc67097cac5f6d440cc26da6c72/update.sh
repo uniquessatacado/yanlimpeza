@@ -6,9 +6,11 @@ APP_USER="yanapp"
 APP_ROOT="/opt/yan-limpeza"
 APP_HOME="/var/lib/yan-limpeza"
 APP_PORT="3107"
-APP_VERSION="24"
+APP_VERSION="25"
 REPO_URL="https://github.com/uniquessatacado/yanlimpeza.git"
 SOURCE_REF="main"
+SUPABASE_URL="https://kedggjyerexnzmipaick.supabase.co"
+SUPABASE_PUBLISHABLE_KEY="sb_publishable_WoobBV7n0p5Jf-4DLJVzIA_4sUoAvsT"
 TMP_DIR="$(mktemp -d)"
 RELEASE_ID="$(date -u +%Y%m%d%H%M%S)"
 RELEASE_DIR="${APP_ROOT}/releases/${RELEASE_ID}"
@@ -146,6 +148,11 @@ for env_file in .env .env.local .env.production .env.production.local; do
     cp -a "${PREVIOUS_RELEASE}/${env_file}" "${RELEASE_DIR}/${env_file}"
   fi
 done
+
+cat > "${RELEASE_DIR}/.env.production.local" <<EOF
+NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_URL}
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=${SUPABASE_PUBLISHABLE_KEY}
+EOF
 
 chown -R "${APP_USER}:${APP_USER}" "${RELEASE_DIR}"
 
