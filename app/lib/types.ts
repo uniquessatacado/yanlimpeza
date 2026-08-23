@@ -125,6 +125,8 @@ export type Order = {
   client?: Client;
   items?: OrderItem[];
   photos?: OrderPhoto[];
+  receivables?: Receivable[];
+  payments?: Payment[];
 };
 
 export type YanSettings = {
@@ -138,6 +140,20 @@ export type YanSettings = {
   warranty_value: number;
   warranty_unit: "days" | "months";
   warranty_notes: string;
+  workdays: number[];
+  work_start: string;
+  work_end: string;
+  slot_interval_minutes: number;
+  pdf_title: string;
+  pdf_intro: string;
+  pdf_service_notes: string;
+  pdf_aftercare: string;
+  pdf_payment_notes: string;
+  pdf_footer: string;
+  pdf_show_prices: boolean;
+  pdf_show_payment: boolean;
+  pdf_show_warranty: boolean;
+  pdf_show_photos: boolean;
 };
 
 export type Receivable = {

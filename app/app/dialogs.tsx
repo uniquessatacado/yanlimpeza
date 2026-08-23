@@ -5,7 +5,7 @@ import {
   Clock3, FileDown, History, House, Loader2, MapPin, MessageCircle, Pencil, Plus,
   Save, Send, Sparkles, Trash2, UserPlus, UserRound, X,
 } from "lucide-react";
-import { FormEvent, ReactNode, useLayoutEffect, useMemo, useState } from "react";
+import { FormEvent, ReactNode, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { dateTime, digits, money, todayIso } from "../lib/format";
 import { deliverOrderPdf } from "../lib/order-pdf";
 import { supabase } from "../lib/supabase";
@@ -91,10 +91,39 @@ function unlockPageBehindModal() {
   html.style.scrollBehavior = snapshot.html.scrollBehavior;
 }
 
-export function Modal({ title, subtitle, children, onClose, wide = false, panelClassName = "" }: { title: string; subtitle?: string; children: ReactNode; onClose: () => void; wide?: boolean; panelClassName?: string }) {
-  useLayoutEffect(() => { lockPageBehindModal(); return unlockPageBehindModal; }, []);
+export function usePageScrollLock(enabled = true, mobileOnly = false) {
+  useLayoutEffect(() => {
+    if (!enabled || (mobileOnly && !window.matchMedia("(max-width: 900px)").matches)) return;
+    lockPageBehindModal();
+    return unlockPageBehindModal;
+  }, [enabled, mobileOnly]);
+}
+
+function useModalKeyboardGuard() {
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+    const sync = () => {
+      document.documentElement.style.setProperty("--modal-viewport-height", `${viewport.height}px`);
+      document.documentElement.style.setProperty("--modal-viewport-offset", `${viewport.offsetTop}px`);
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName)) {
+        window.setTimeout(() => active.scrollIntoView({ behavior: "smooth", block: "center" }), 60);
+      }
+    };
+    sync(); viewport.addEventListener("resize", sync); viewport.addEventListener("scroll", sync);
+    return () => {
+      viewport.removeEventListener("resize", sync); viewport.removeEventListener("scroll", sync);
+      document.documentElement.style.removeProperty("--modal-viewport-height"); document.documentElement.style.removeProperty("--modal-viewport-offset");
+    };
+  }, []);
+}
+
+export function Modal({ title, subtitle, children, onClose, wide = false, panelClassName = "", closeOnBackdrop = true }: { title: string; subtitle?: string; children: ReactNode; onClose: () => void; wide?: boolean; panelClassName?: string; closeOnBackdrop?: boolean }) {
+  usePageScrollLock();
+  useModalKeyboardGuard();
   const classes = ["modal-panel", wide ? "modal-wide" : "", panelClassName].filter(Boolean).join(" ");
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className={classes} role="dialog" aria-modal="true" aria-label={title}><header className="modal-header"><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div><button className="icon-button" onClick={onClose} aria-label="Fechar"><X /></button></header>{children}</section></div>;
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (closeOnBackdrop && event.target === event.currentTarget) onClose(); }}><section className={classes} role="dialog" aria-modal="true" aria-label={title} onMouseDown={(event) => event.stopPropagation()} onFocusCapture={(event) => { const field = event.target as HTMLElement; if (/^(INPUT|TEXTAREA|SELECT)$/.test(field.tagName)) window.setTimeout(() => field.scrollIntoView({ behavior: "smooth", block: "center" }), 280); }}><header className="modal-header"><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div><button type="button" className="icon-button" onClick={onClose} aria-label="Fechar"><X /></button></header>{children}</section></div>;
 }
 
 type ClientDraft = { name: string; whatsapp: string; previous_customer: boolean; last_service_date: string; last_service_description: string };
@@ -102,16 +131,55 @@ const blankClient: ClientDraft = { name: "", whatsapp: "", previous_customer: fa
 const blankAddress = (): AddressDraft => ({ zipcode: "", street: "", street_number: "", complement: "", neighborhood: "", city: "Indaiatuba", state: "SP" });
 function addressFromClient(client?: Client): AddressDraft { return { zipcode: client?.zipcode ?? "", street: client?.street ?? "", street_number: client?.street_number ?? "", complement: client?.complement ?? "", neighborhood: client?.neighborhood ?? "", city: client?.city ?? "Indaiatuba", state: client?.state ?? "SP" }; }
 function hasAddress(address: AddressDraft) { return Boolean(address.zipcode || address.street || address.street_number || address.neighborhood || address.complement); }
+type ClientHistoryItem = { key: string; serviceId: string; optionId: string; quantity: string; price: string };
+const newHistoryItem = (): ClientHistoryItem => ({ key: typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`, serviceId: "", optionId: "", quantity: "1", price: "" });
 
-export function ClientDialog({ services, onClose, onSaved }: { services: Service[]; onClose: () => void; onSaved: (client: Client) => void | Promise<void> }) {
+type HistoryCatalogDraft = { itemKey: string; kind: "service" | "option"; name: string; price: string; mode: ServiceOption["pricing_mode"]; duration: number };
+
+function HistoryCatalogEditor({ draft, services, presets, onClose, onCreated }: { draft: HistoryCatalogDraft; services: Service[]; presets: ReturnPreset[]; onClose: () => void; onCreated: (service: Service, option?: ServiceOption) => void }) {
+  const [name, setName] = useState(draft.name); const [price, setPrice] = useState(draft.price); const [mode, setMode] = useState<ServiceOption["pricing_mode"]>(draft.mode); const [duration, setDuration] = useState(draft.duration); const [busy, setBusy] = useState(false); const [error, setError] = useState("");
+  const service = services.find((entry) => entry.id === draft.itemKey.split("::")[1]);
+  const presetId = service?.default_return_preset_id ?? presets.find((entry) => entry.active && entry.value === 6 && entry.unit === "months")?.id ?? presets.find((entry) => entry.active)?.id ?? null;
+  const preset = presets.find((entry) => entry.id === presetId);
+  async function save() {
+    setError(""); if (name.trim().length < 2) return setError(draft.kind === "service" ? "Digite o nome do serviço." : "Digite o nome do modelo."); setBusy(true);
+    try {
+      if (draft.kind === "service") {
+        const { data, error: insertError } = await supabase.from("yan_services").insert({ name: name.trim(), description: null, default_return_preset_id: presetId }).select("*").single();
+        if (insertError) throw insertError; onCreated({ ...(data as Service), options: [] });
+      } else {
+        if (!service) throw new Error("Escolha um serviço antes de criar o modelo.");
+        const { data, error: insertError } = await supabase.from("yan_service_options").insert({ service_id: service.id, name: name.trim(), pricing_mode: mode, sale_price: price === "" ? null : Number(price), cost_price: null, duration_minutes: duration, return_months: preset?.unit === "months" ? preset.value : 6, return_preset_id: presetId }).select("*").single();
+        if (insertError) throw insertError; onCreated(service, data as ServiceOption);
+      }
+    } catch (caught) { setError(caught instanceof Error ? caught.message : "Não foi possível cadastrar."); } finally { setBusy(false); }
+  }
+  return <div className="history-catalog-editor"><div className="history-catalog-title"><span><Plus /></span><div><strong>{draft.kind === "service" ? "Cadastrar serviço agora" : `Novo modelo de ${service?.name ?? "serviço"}`}</strong><small>O novo cadastro será selecionado sem fechar esta tela.</small></div></div><div className="form-grid two"><label>{draft.kind === "service" ? "Nome do serviço" : "Nome do modelo"}<input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder={draft.kind === "service" ? "Ex.: Poltrona" : "Ex.: 3 lugares"} /></label>{draft.kind === "option" && <label>Preço padrão <span>opcional</span><div className="money-field"><i>R$</i><input type="number" min="0" step="0.01" value={price} onChange={(event) => setPrice(event.target.value)} placeholder="Digite o valor" /></div></label>}</div>{draft.kind === "option" && <div className="form-grid two"><label>Forma de cálculo<select value={mode} onChange={(event) => setMode(event.target.value as ServiceOption["pricing_mode"])}><option value="fixed">Preço fechado</option><option value="per_unit">Por unidade</option><option value="per_m2">Por metro quadrado</option></select></label><label>Duração (min)<input type="number" min="5" value={duration || ""} onChange={(event) => setDuration(Number(event.target.value))} placeholder="60" /></label></div>}{error && <div className="form-alert error"><AlertTriangle />{error}</div>}<div className="history-catalog-actions"><button type="button" className="button-secondary" onClick={onClose}>Voltar</button><button type="button" className="button-admin-primary" disabled={busy} onClick={() => void save()}>{busy ? <Loader2 className="spin" /> : <Plus />}{busy ? "Salvando..." : draft.kind === "service" ? "Criar serviço" : "Criar modelo"}</button></div></div>;
+}
+
+function ClientHistoryEditor({ items, onChange, services, onServicesChange, presets }: { items: ClientHistoryItem[]; onChange: (items: ClientHistoryItem[]) => void; services: Service[]; onServicesChange: React.Dispatch<React.SetStateAction<Service[]>>; presets: ReturnPreset[] }) {
+  const [quick, setQuick] = useState<HistoryCatalogDraft | null>(null);
+  function patch(key: string, value: Partial<ClientHistoryItem>) { onChange(items.map((item) => item.key === key ? { ...item, ...value } : item)); }
+  function created(itemKey: string, service: Service, option?: ServiceOption) {
+    onServicesChange((current) => { const found = current.some((entry) => entry.id === service.id); if (!found) return [...current, service]; if (!option) return current; return current.map((entry) => entry.id === service.id ? { ...entry, options: [...(entry.options ?? []), option] } : entry); });
+    patch(itemKey, { serviceId: service.id, optionId: option?.id ?? "", price: option?.sale_price === null || option?.sale_price === undefined ? "" : String(option.sale_price) }); setQuick(null);
+  }
+  const total = items.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.price || 0), 0);
+  return <div className="history-services-editor"><div className="history-editor-head"><div><strong>Serviços anteriores</strong><small>Opcional. Adicione quantos precisar.</small></div>{total > 0 && <span>{money(total)}</span>}</div>{items.map((item, index) => { const service = services.find((entry) => entry.id === item.serviceId); const options = service?.options?.filter((entry) => entry.active) ?? []; return <article key={item.key}><header><strong>Serviço {index + 1}</strong>{items.length > 1 && <button type="button" onClick={() => onChange(items.filter((entry) => entry.key !== item.key))}><Trash2 /> Remover</button>}</header><div className="history-service-grid"><label>Serviço<select value={item.serviceId} onChange={(event) => { const selected = services.find((entry) => entry.id === event.target.value); const option = selected?.options?.find((entry) => entry.active); patch(item.key, { serviceId: event.target.value, optionId: option?.id ?? "", price: option?.sale_price === null || option?.sale_price === undefined ? "" : String(option.sale_price) }); }}><option value="">Não informar</option>{services.filter((entry) => entry.active).map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></label><label>Modelo<select value={item.optionId} disabled={!item.serviceId} onChange={(event) => { const option = options.find((entry) => entry.id === event.target.value); patch(item.key, { optionId: event.target.value, price: option?.sale_price === null || option?.sale_price === undefined ? item.price : String(option.sale_price) }); }}><option value="">Sem modelo</option>{options.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}</select></label><label className="history-quantity">Quantidade<input type="number" min="0.01" step="0.01" value={item.quantity} onChange={(event) => patch(item.key, { quantity: event.target.value })} /></label><label className="history-price">Valor cobrado<input type="number" min="0" step="0.01" value={item.price} onChange={(event) => patch(item.key, { price: event.target.value })} placeholder="Digite o valor" /></label></div><div className="history-catalog-buttons"><button type="button" onClick={() => setQuick({ itemKey: item.key, kind: "service", name: "", price: "", mode: "fixed", duration: 60 })}><Plus /> Novo serviço</button><button type="button" disabled={!item.serviceId} onClick={() => item.serviceId && setQuick({ itemKey: `${item.key}::${item.serviceId}`, kind: "option", name: "", price: item.price, mode: "fixed", duration: 60 })}><Plus /> {item.serviceId ? "Novo modelo" : "Escolha o serviço"}</button></div>{quick && (quick.itemKey === item.key || quick.itemKey.startsWith(`${item.key}::`)) && <HistoryCatalogEditor draft={quick} services={services} presets={presets} onClose={() => setQuick(null)} onCreated={(createdService, option) => created(item.key, createdService, option)} />}</article>; })}<button type="button" className="add-history-service" onClick={() => onChange([...items, newHistoryItem()])}><Plus /> Adicionar outro serviço</button></div>;
+}
+
+export function ClientDialog({ services, presets, onClose, onSaved }: { services: Service[]; presets: ReturnPreset[]; onClose: () => void; onSaved: (client: Client) => void | Promise<void> }) {
   const [form, setForm] = useState<ClientDraft>(blankClient);
   const [address, setAddress] = useState<AddressDraft>(blankAddress());
   const [step, setStep] = useState(1);
   const [historyChoice, setHistoryChoice] = useState<boolean | null>(null);
+  const [historyItems, setHistoryItems] = useState<ClientHistoryItem[]>([newHistoryItem()]);
+  const [availableServices, setAvailableServices] = useState<Service[]>(services);
+  const [historyPaid, setHistoryPaid] = useState(false); const [historyPaymentMethod, setHistoryPaymentMethod] = useState("pix");
   const [wantsAddress, setWantsAddress] = useState<boolean | null>(null);
   const [duplicate, setDuplicate] = useState<{ id: string; name: string; whatsapp: string } | null>(null);
   const [busy, setBusy] = useState(false); const [error, setError] = useState("");
-  const activeServices = services.filter((service) => service.active);
+  const activeServices = availableServices.filter((service) => service.active);
 
   function nextStep() {
     setError("");
@@ -124,6 +192,7 @@ export function ClientDialog({ services, onClose, onSaved }: { services: Service
     if (step === 2) {
       if (historyChoice === null) return setError("Escolha se este cliente já fez algum serviço.");
       if (historyChoice && !form.last_service_date) return setError("Informe a data em que o serviço foi feito.");
+      if (historyChoice && historyPaid && historyItems.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.price || 0), 0) <= 0) return setError("Informe o valor cobrado antes de marcar o histórico como pago.");
     }
     setStep((current) => Math.min(3, current + 1));
   }
@@ -133,10 +202,20 @@ export function ClientDialog({ services, onClose, onSaved }: { services: Service
     try {
       const phone = digits(form.whatsapp);
       if (duplicate || await findClientByWhatsapp(phone)) throw new Error("Este WhatsApp já está cadastrado.");
-      const payload = { name: form.name.trim(), whatsapp: phone, email: null, previous_customer: historyChoice === true, last_service_date: historyChoice ? form.last_service_date : null, last_service_description: historyChoice ? form.last_service_description.trim() || null : null, street: wantsAddress ? address.street.trim() || null : null, street_number: wantsAddress ? address.street_number.trim() || null : null, complement: wantsAddress ? address.complement.trim() || null : null, neighborhood: wantsAddress ? address.neighborhood.trim() || null : null, city: wantsAddress ? address.city.trim() || "Indaiatuba" : "Indaiatuba", state: wantsAddress ? address.state.trim().toUpperCase() || "SP" : "SP", zipcode: wantsAddress ? digits(address.zipcode) || null : null, notes: null, decision_status: "pending" as const, follow_up_at: todayIso() };
+      const validHistory = historyItems.filter((item) => item.serviceId); const historyNames = validHistory.map((item) => { const service = availableServices.find((entry) => entry.id === item.serviceId); const option = service?.options?.find((entry) => entry.id === item.optionId); return `${service?.name ?? "Serviço"}${option ? ` · ${option.name}` : ""}`; });
+      const payload = { name: form.name.trim(), whatsapp: phone, email: null, previous_customer: historyChoice === true, last_service_date: historyChoice ? form.last_service_date : null, last_service_description: historyChoice ? historyNames.join(", ") || null : null, street: wantsAddress ? address.street.trim() || null : null, street_number: wantsAddress ? address.street_number.trim() || null : null, complement: wantsAddress ? address.complement.trim() || null : null, neighborhood: wantsAddress ? address.neighborhood.trim() || null : null, city: wantsAddress ? address.city.trim() || "Indaiatuba" : "Indaiatuba", state: wantsAddress ? address.state.trim().toUpperCase() || "SP" : "SP", zipcode: wantsAddress ? digits(address.zipcode) || null : null, notes: null, decision_status: "pending" as const, follow_up_at: todayIso() };
       const { data, error: insertError } = await supabase.from("yan_clients").insert(payload).select("*").single();
       if (insertError) throw new Error(insertError.code === "23505" ? "Já existe um cliente com este WhatsApp." : insertError.message);
       const client = data as Client;
+      if (historyChoice && form.last_service_date && validHistory.length) {
+        const startsAt = new Date(`${form.last_service_date}T12:00:00`); const duration = validHistory.reduce((sum, item) => { const service = availableServices.find((entry) => entry.id === item.serviceId); const option = service?.options?.find((entry) => entry.id === item.optionId); return sum + (option?.duration_minutes ?? 60) * Math.max(1, Number(item.quantity || 1)); }, 0); const endsAt = new Date(startsAt.getTime() + duration * 60_000);
+        const { data: historicalOrder, error: historicalOrderError } = await supabase.from("yan_orders").insert({ client_id: client.id, status: "completed", scheduled_start: startsAt.toISOString(), scheduled_end: endsAt.toISOString(), completed_at: startsAt.toISOString(), street: payload.street, street_number: payload.street_number, complement: payload.complement, neighborhood: payload.neighborhood, city: payload.city, state: payload.state, zipcode: payload.zipcode, notes: "Atendimento anterior informado no cadastro do cliente." }).select("id,order_number").single();
+        if (historicalOrderError) throw historicalOrderError;
+        const historicalRows = validHistory.map((item) => { const service = availableServices.find((entry) => entry.id === item.serviceId)!; const option = service.options?.find((entry) => entry.id === item.optionId); return { order_id: historicalOrder.id, service_id: service.id, option_id: option?.id ?? null, description: `${service.name}${option ? ` · ${option.name}` : ""}`, pricing_mode: option?.pricing_mode ?? "fixed", quantity: Math.max(0.01, Number(item.quantity || 1)), unit_price: Number(item.price || 0), unit_cost: Number(option?.cost_price ?? 0), discount_type: "fixed", discount_value: 0, duration_minutes: option?.duration_minutes ?? 60, width_m: null, length_m: null }; });
+        const { error: historicalItemsError } = await supabase.from("yan_order_items").insert(historicalRows); if (historicalItemsError) throw historicalItemsError;
+        await supabase.from("yan_order_events").insert({ order_id: historicalOrder.id, kind: "created", body: `Histórico anterior registrado no cadastro do cliente. Ordem #${historicalOrder.order_number}.` });
+        if (historyPaid) { const { error: historicalPaymentError } = await supabase.rpc("yan_record_historical_payment", { p_order_id: historicalOrder.id, p_occurred_at: startsAt.toISOString(), p_method: historyPaymentMethod }); if (historicalPaymentError) throw historicalPaymentError; }
+      }
       await supabase.from("yan_follow_ups").insert({ client_id: client.id, due_date: todayIso(), kind: "decision", notes: "Novo atendimento aguardando decisão" });
       await onSaved(client); onClose();
     } catch (caught) { setError(caught instanceof Error ? caught.message : "Não foi possível cadastrar o cliente."); }
@@ -147,7 +226,7 @@ export function ClientDialog({ services, onClose, onSaved }: { services: Service
   return <Modal title="Cadastrar cliente" subtitle={subtitles[step - 1]} onClose={onClose} panelClassName="modal-client"><form className="modal-form client-wizard" onSubmit={submit}>
     <WizardProgress step={step} labels={["Contato", "Histórico", "Endereço"]} />
     {step === 1 && <section className="wizard-step"><div className="wizard-heading"><span><UserRound /></span><div><strong>Quem é o cliente?</strong><p>As duas informações abaixo são obrigatórias.</p></div></div><label className="visual-field"><span>Nome do cliente <b className="required-mark">obrigatório</b></span><div className="visual-input"><UserRound /><input autoFocus required minLength={2} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Digite o nome completo" autoComplete="name" /></div></label><WhatsappField value={form.whatsapp} onChange={(whatsapp) => setForm({ ...form, whatsapp })} onDuplicate={setDuplicate} /></section>}
-    {step === 2 && <section className="wizard-step"><div className="wizard-heading"><span><History /></span><div><strong>Já fez serviço com a Yan?</strong><p>Isso alimenta o histórico e os próximos retornos.</p></div></div><div className="visual-choice-grid two-options"><button type="button" className={historyChoice === true ? "selected" : ""} onClick={() => { setHistoryChoice(true); setForm({ ...form, previous_customer: true }); }}><span><Check /></span><strong>Sim, já fez</strong><small>Registrar a data anterior</small></button><button type="button" className={historyChoice === false ? "selected" : ""} onClick={() => { setHistoryChoice(false); setForm({ ...form, previous_customer: false, last_service_date: "", last_service_description: "" }); }}><span><Sparkles /></span><strong>Ainda não</strong><small>É um cliente novo</small></button></div>{historyChoice && <div className="wizard-reveal history-reveal"><label>Quando foi? <b className="required-mark">obrigatório</b><div className="visual-input compact"><CalendarDays /><input required type="date" max={todayIso()} value={form.last_service_date} onChange={(event) => setForm({ ...form, last_service_date: event.target.value })} /></div></label><label>Serviço realizado <span>opcional</span><select value={form.last_service_description} onChange={(event) => setForm({ ...form, last_service_description: event.target.value })}><option value="">Não informar agora</option>{activeServices.map((service) => <option key={service.id} value={service.name}>{service.name}</option>)}</select></label></div>}</section>}
+    {step === 2 && <section className="wizard-step"><div className="wizard-heading"><span><History /></span><div><strong>Já fez serviço com a Yan?</strong><p>Isso alimenta o histórico e os próximos retornos.</p></div></div><div className="visual-choice-grid two-options"><button type="button" className={historyChoice === true ? "selected" : ""} onClick={() => { setHistoryChoice(true); setForm({ ...form, previous_customer: true }); }}><span><Check /></span><strong>Sim, já fez</strong><small>Registrar atendimento anterior</small></button><button type="button" className={historyChoice === false ? "selected" : ""} onClick={() => { setHistoryChoice(false); setHistoryPaid(false); setForm({ ...form, previous_customer: false, last_service_date: "", last_service_description: "" }); }}><span><Sparkles /></span><strong>Ainda não</strong><small>É um cliente novo</small></button></div>{historyChoice && <div className="wizard-reveal history-reveal client-history-reveal"><label>Quando foi? <b className="required-mark">obrigatório</b><div className="visual-input compact"><CalendarDays /><input required type="date" max={todayIso()} value={form.last_service_date} onChange={(event) => setForm({ ...form, last_service_date: event.target.value })} /></div></label><ClientHistoryEditor items={historyItems} onChange={setHistoryItems} services={activeServices} onServicesChange={setAvailableServices} presets={presets} /><div className={historyPaid ? "history-payment active" : "history-payment"}><label className="switch-row"><input type="checkbox" checked={historyPaid} onChange={(event) => setHistoryPaid(event.target.checked)} /><span>Marcar este atendimento como pago</span></label>{historyPaid && <label>Forma de pagamento<select value={historyPaymentMethod} onChange={(event) => setHistoryPaymentMethod(event.target.value)}><option value="pix">Pix</option><option value="cash">Dinheiro</option><option value="card">Cartão</option><option value="transfer">Transferência</option><option value="other">Outro</option></select><small className="field-help">O recebimento entrará na Visão geral usando a data do serviço acima.</small></label>}</div></div>}</section>}
     {step === 3 && <section className="wizard-step"><div className="wizard-heading"><span><MapPin /></span><div><strong>Quer guardar o endereço?</strong><p>É opcional e poderá ser preenchido ou alterado depois.</p></div></div><div className="visual-choice-grid two-options"><button type="button" className={wantsAddress === true ? "selected" : ""} onClick={() => setWantsAddress(true)}><span><House /></span><strong>Adicionar endereço</strong><small>Começar pelo CEP</small></button><button type="button" className={wantsAddress === false ? "selected" : ""} onClick={() => setWantsAddress(false)}><span><ArrowRight /></span><strong>Salvar sem endereço</strong><small>Continuar só com o contato</small></button></div>{wantsAddress && <div className="wizard-reveal address-reveal"><AddressFields value={address} onChange={setAddress} /></div>}</section>}
     {error && <div className="form-alert error"><AlertTriangle />{error}</div>}
     <div className="modal-actions wizard-actions">{step === 1 ? <button type="button" className="button-secondary" onClick={onClose}>Cancelar</button> : <button type="button" className="button-secondary" onClick={() => { setError(""); setStep(step - 1); }}><ArrowLeft /> Voltar</button>}{step < 3 ? <button type="button" className="button-admin-primary" onClick={nextStep}>Continuar <ArrowRight /></button> : <button className="button-admin-primary" disabled={busy || Boolean(duplicate)}>{busy ? <Loader2 className="spin" /> : <UserPlus />}{busy ? "Cadastrando..." : "Salvar cliente"}</button>}</div>
@@ -155,14 +234,61 @@ export function ClientDialog({ services, onClose, onSaved }: { services: Service
 }
 
 export function EditClientDialog({ client, onClose, onSaved }: { client: Client; onClose: () => void; onSaved: () => void | Promise<void> }) {
-  const [step, setStep] = useState(1); const [name, setName] = useState(client.name); const [whatsapp, setWhatsapp] = useState(client.whatsapp);
-  const [address, setAddress] = useState<AddressDraft>(addressFromClient(client)); const [wantsAddress, setWantsAddress] = useState(hasAddress(address));
-  const [duplicate, setDuplicate] = useState<{ id: string; name: string; whatsapp: string } | null>(null); const [busy, setBusy] = useState(false); const [error, setError] = useState("");
-  function nextStep() { setError(""); if (name.trim().length < 2) return setError("Informe o nome do cliente."); if (digits(whatsapp).length < 10) return setError("Informe um WhatsApp válido."); if (duplicate) return setError(`Este WhatsApp já pertence a ${duplicate.name}.`); setStep(2); }
-  async function submit(event: FormEvent) { event.preventDefault(); if (step === 1) return nextStep(); setBusy(true); setError(""); const { error: updateError } = await supabase.from("yan_clients").update({ name: name.trim(), whatsapp: digits(whatsapp), zipcode: wantsAddress ? digits(address.zipcode) || null : null, street: wantsAddress ? address.street.trim() || null : null, street_number: wantsAddress ? address.street_number.trim() || null : null, complement: wantsAddress ? address.complement.trim() || null : null, neighborhood: wantsAddress ? address.neighborhood.trim() || null : null, city: wantsAddress ? address.city.trim() || "Indaiatuba" : "Indaiatuba", state: wantsAddress ? address.state.trim() || "SP" : "SP" }).eq("id", client.id); if (updateError) setError(updateError.code === "23505" ? "Este WhatsApp já está em outro cadastro." : updateError.message); else { await onSaved(); onClose(); } setBusy(false); }
-  return <Modal title={`Editar ${client.name}`} subtitle={step === 1 ? "Nome e WhatsApp são obrigatórios." : "O endereço continua opcional."} onClose={onClose} panelClassName="modal-client"><form className="modal-form client-wizard" onSubmit={submit}><WizardProgress step={step} labels={["Contato", "Endereço"]} />{step === 1 && <section className="wizard-step"><div className="wizard-heading"><span><Pencil /></span><div><strong>Dados principais</strong><p>O sistema confere o WhatsApp antes de salvar.</p></div></div><label className="visual-field"><span>Nome <b className="required-mark">obrigatório</b></span><div className="visual-input"><UserRound /><input autoFocus required value={name} onChange={(event) => setName(event.target.value)} /></div></label><WhatsappField value={whatsapp} onChange={setWhatsapp} onDuplicate={setDuplicate} excludeClientId={client.id} /></section>}{step === 2 && <section className="wizard-step"><div className="wizard-heading"><span><MapPin /></span><div><strong>Endereço do cliente</strong><p>Comece pelo CEP ou preencha manualmente.</p></div></div><div className="visual-choice-grid two-options"><button type="button" className={wantsAddress ? "selected" : ""} onClick={() => setWantsAddress(true)}><span><House /></span><strong>Manter endereço</strong><small>Editar os dados abaixo</small></button><button type="button" className={!wantsAddress ? "selected" : ""} onClick={() => setWantsAddress(false)}><span><X /></span><strong>Sem endereço</strong><small>Remover do cadastro</small></button></div>{wantsAddress && <div className="wizard-reveal address-reveal"><AddressFields value={address} onChange={setAddress} /></div>}</section>}{error && <div className="form-alert error"><AlertTriangle />{error}</div>}<div className="modal-actions wizard-actions"><button type="button" className="button-secondary" onClick={() => step === 1 ? onClose() : setStep(1)}>{step === 1 ? "Cancelar" : <><ArrowLeft /> Voltar</>}</button>{step === 1 ? <button type="button" className="button-admin-primary" onClick={nextStep}>Continuar <ArrowRight /></button> : <button className="button-admin-primary" disabled={busy || Boolean(duplicate)}>{busy ? <Loader2 className="spin" /> : <Save />}{busy ? "Salvando..." : "Salvar alterações"}</button>}</div></form></Modal>;
+  const [name, setName] = useState(client.name);
+  const [whatsapp, setWhatsapp] = useState(client.whatsapp);
+  const [address, setAddress] = useState<AddressDraft>(addressFromClient(client));
+  const [wantsAddress, setWantsAddress] = useState(true);
+  const [duplicate, setDuplicate] = useState<{ id: string; name: string; whatsapp: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setError("");
+    if (name.trim().length < 2) return setError("Informe o nome do cliente.");
+    if (digits(whatsapp).length < 10) return setError("Informe um WhatsApp válido.");
+    if (duplicate) return setError(`Este WhatsApp já pertence a ${duplicate.name}.`);
+    setBusy(true);
+    try {
+      const { error: updateError } = await supabase.from("yan_clients").update({
+        name: name.trim(), whatsapp: digits(whatsapp),
+        zipcode: wantsAddress ? digits(address.zipcode) || null : null,
+        street: wantsAddress ? address.street.trim() || null : null,
+        street_number: wantsAddress ? address.street_number.trim() || null : null,
+        complement: wantsAddress ? address.complement.trim() || null : null,
+        neighborhood: wantsAddress ? address.neighborhood.trim() || null : null,
+        city: wantsAddress ? address.city.trim() || "Indaiatuba" : "Indaiatuba",
+        state: wantsAddress ? address.state.trim().toUpperCase() || "SP" : "SP",
+      }).eq("id", client.id);
+      if (updateError) throw new Error(updateError.code === "23505" ? "Este WhatsApp já está em outro cadastro." : updateError.message);
+      await onSaved();
+      onClose();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Não foi possível atualizar o cliente.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <Modal title={`Editar ${client.name}`} subtitle="Editar cliente e endereço" onClose={onClose} panelClassName="modal-client"><form className="modal-form client-wizard" onSubmit={submit} onKeyDown={(event) => { if (event.key === "Enter" && event.target instanceof HTMLInputElement) event.preventDefault(); }}>
+    <section className="wizard-step"><div className="wizard-heading"><span><Pencil /></span><div><strong>Dados do cliente</strong><p>Nome, WhatsApp e endereço ficam na mesma tela. Nada fecha até você salvar ou cancelar.</p></div></div>
+      <label className="visual-field"><span>Nome <b className="required-mark">obrigatório</b></span><div className="visual-input"><UserRound /><input autoFocus required value={name} onChange={(event) => setName(event.target.value)} /></div></label>
+      <WhatsappField value={whatsapp} onChange={setWhatsapp} onDuplicate={setDuplicate} excludeClientId={client.id} />
+      <div className="wizard-heading"><span><MapPin /></span><div><strong>Endereço</strong><p>Edite qualquer campo abaixo ou remova o endereço do cadastro.</p></div></div>
+      <div className="visual-choice-grid two-options"><button type="button" className={wantsAddress ? "selected" : ""} onClick={() => setWantsAddress(true)}><span><House /></span><strong>Usar endereço</strong><small>Editar os dados abaixo</small></button><button type="button" className={!wantsAddress ? "selected" : ""} onClick={() => setWantsAddress(false)}><span><X /></span><strong>Sem endereço</strong><small>Remover do cadastro</small></button></div>
+      {wantsAddress && <div className="wizard-reveal address-reveal"><AddressFields value={address} onChange={setAddress} /></div>}
+    </section>
+    {error && <div className="form-alert error"><AlertTriangle />{error}</div>}
+    <div className="modal-actions wizard-actions"><button type="button" className="button-secondary" onClick={onClose}>Cancelar</button><button type="submit" className="button-admin-primary" disabled={busy || Boolean(duplicate)}>{busy ? <Loader2 className="spin" /> : <Save />}{busy ? "Salvando..." : "Salvar cliente e endereço"}</button></div>
+  </form></Modal>;
 }
 
+export function OrderDetailsDialog({ order, onClose }: { order: Order; onClose: () => void }) {
+  const paid = (order.payments ?? []).reduce((sum, entry) => sum + (entry.kind === "payment" ? Number(entry.amount) : -Number(entry.amount)), 0);
+  const open = (order.receivables ?? []).reduce((sum, entry) => sum + (["pending", "partial"].includes(entry.status) ? Number(entry.balance) : 0), 0);
+  const address = [order.street, order.street_number, order.complement, order.neighborhood, order.city, order.state].filter(Boolean).join(", ");
+  return <Modal title={`Ordem #${order.order_number}`} subtitle={`${order.client?.name ?? "Cliente"} · detalhes do atendimento`} onClose={onClose} wide panelClassName="modal-order-details"><div className="modal-form order-details"><div className="order-details-summary"><article><small>Serviço agendado</small><strong>{dateTime(order.scheduled_start)}</strong></article><article><small>Ordem criada</small><strong>{dateTime(order.created_at)}</strong></article><article><small>Status</small><strong>{order.status === "completed" ? "Concluída" : order.status === "in_progress" ? "Em andamento" : order.status === "scheduled" ? "Agendada" : order.status}</strong></article><article><small>Total</small><strong>{money(order.total)}</strong></article></div><section className="order-detail-section"><h3>Serviços e valores</h3><div className="order-detail-items">{(order.items ?? []).map((item) => <article key={item.id}><div><strong>{item.service?.name ?? item.description}</strong><small>{item.option?.name ?? "Sem modelo"}</small></div><span><small>{item.quantity} × {money(item.unit_price)}</small><strong>{money(item.line_total)}</strong></span></article>)}</div>{order.discount_amount > 0 && <div className="order-detail-discount"><span>Desconto geral</span><strong>− {money(order.discount_amount)}</strong></div>}</section><section className="order-detail-section"><h3>Pagamento</h3><div className="order-payment-summary"><span><small>Pago</small><strong>{money(paid)}</strong></span><span><small>Em aberto</small><strong>{money(open)}</strong></span></div></section><section className="order-detail-section"><h3>Local e observações</h3><p><MapPin />{address || "Endereço não informado"}</p>{order.notes && <p>{order.notes}</p>}</section><div className="modal-actions"><button className="button-admin-primary" onClick={onClose}><Check /> Fechar detalhes</button></div></div></Modal>;
+}
 type ItemDraft = { key: string; serviceId: string; optionId: string; quantity: number; unitPrice: string; unitCost: number; discountType: "fixed" | "percent"; discountValue: number; duration: number; width: string; length: string };
 const draftKey = () => typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const newItem = (): ItemDraft => ({ key: draftKey(), serviceId: "", optionId: "", quantity: 1, unitPrice: "", unitCost: 0, discountType: "fixed", discountValue: 0, duration: 60, width: "", length: "" });
@@ -232,7 +358,19 @@ export function CompleteDialog({ order, settings, onClose, onSaved }: { order: O
   const [step, setStep] = useState(1); const [files, setFiles] = useState<File[]>([]); const [mode, setMode] = useState<"paid" | "due" | "installments">("paid");
   const [installments, setInstallments] = useState(2); const [dueDate, setDueDate] = useState(todayIso()); const [method, setMethod] = useState("pix");
   const [busy, setBusy] = useState(false); const [error, setError] = useState(""); const [completed, setCompleted] = useState<Order | null>(null); const [photoWarning, setPhotoWarning] = useState("");
-  async function finish() { setBusy(true); setError(""); try { const { error: rpcError } = await supabase.rpc("yan_complete_order", { p_order_id: order.id, p_payment_mode: mode, p_installments: mode === "installments" ? installments : 1, p_first_due_date: dueDate, p_method: method }); if (rpcError) throw rpcError; let afterPhotos = [] as NonNullable<Order["photos"]>; if (files.length) { try { afterPhotos = await uploadOrderPhotos(order.id, "after", files); } catch (caught) { setPhotoWarning(caught instanceof Error ? caught.message : "As fotos finais não puderam ser salvas."); } } const finished: Order = { ...order, status: "completed", completed_at: new Date().toISOString(), photos: [...(order.photos ?? []), ...afterPhotos] }; setCompleted(finished); await onSaved(); } catch (caught) { setError(caught instanceof Error ? caught.message : "Não foi possível concluir o serviço."); } finally { setBusy(false); } }
+  async function finish() {
+    setBusy(true); setError("");
+    try {
+      const { error: rpcError } = await supabase.rpc("yan_complete_order", { p_order_id: order.id, p_payment_mode: mode, p_installments: mode === "installments" ? installments : 1, p_first_due_date: dueDate, p_method: method });
+      if (rpcError) throw rpcError;
+      if (files.length) { try { await uploadOrderPhotos(order.id, "after", files); } catch (caught) { setPhotoWarning(caught instanceof Error ? caught.message : "As fotos finais não puderam ser salvas."); } }
+      const { data: freshOrder, error: refreshError } = await supabase.from("yan_orders").select("*, client:yan_clients(*), items:yan_order_items(*, service:yan_services(id,name), option:yan_service_options(id,name)), photos:yan_order_photos(*), receivables:yan_receivables(*), payments:yan_payments(*)").eq("id", order.id).single();
+      const finished = refreshError || !freshOrder ? { ...order, status: "completed" as const, completed_at: new Date().toISOString() } : freshOrder as unknown as Order;
+      if (refreshError) setPhotoWarning((current) => current || "O serviço foi concluído, mas os dados do PDF precisarão ser recarregados na agenda.");
+      setCompleted(finished); await onSaved();
+    } catch (caught) { setError(caught instanceof Error ? caught.message : "Não foi possível concluir o serviço."); }
+    finally { setBusy(false); }
+  }
   async function pdf(share: boolean) { if (!completed) return; setBusy(true); setError(""); try { await deliverOrderPdf(completed, settings, share); } catch (caught) { setError(caught instanceof Error ? caught.message : "Não foi possível gerar o PDF."); } finally { setBusy(false); } }
   if (completed) return <Modal title="Serviço concluído" subtitle={`Ordem #${order.order_number} finalizada com sucesso.`} onClose={onClose} panelClassName="modal-client"><div className="modal-form completion-success"><div className="success-orbit"><Check /></div><h3>Pronto para enviar ao cliente</h3><p>O PDF reúne serviços, valores, retorno, garantia e as fotos salvas.</p><div className="completion-time"><CalendarDays /><span><small>Concluído em</small><strong>{dateTime(completed.completed_at)}</strong></span></div>{photoWarning && <div className="form-alert warning"><AlertTriangle />O serviço foi concluído, mas uma foto falhou: {photoWarning}</div>}{error && <div className="form-alert error"><AlertTriangle />{error}</div>}<div className="pdf-actions"><button className="button-admin-primary" disabled={busy} onClick={() => void pdf(true)}>{busy ? <Loader2 className="spin" /> : <Send />}Enviar PDF</button><button className="button-secondary" disabled={busy} onClick={() => void pdf(false)}><FileDown />Baixar PDF</button></div><button className="text-action centered" onClick={onClose}>Fechar e voltar às ordens</button></div></Modal>;
   return <Modal title={`Concluir ordem #${order.order_number}`} subtitle={`${order.client?.name ?? "Cliente"} · ${money(order.total)}`} onClose={onClose} panelClassName="modal-complete"><div className="modal-form complete-wizard"><WizardProgress step={step} labels={["Fotos", "Pagamento", "Finalizar"]} />

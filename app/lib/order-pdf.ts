@@ -14,6 +14,8 @@ function warrantyLabel(settings: YanSettings | null) {
   return `${value} ${unit === "days" ? (value === 1 ? "dia" : "dias") : (value === 1 ? "mês" : "meses")}`;
 }
 
+const paymentMethods: Record<string, string> = { pix: "Pix", cash: "Dinheiro", card: "Cartão", transfer: "Transferência", other: "Outro" };
+
 async function urlToDataUrl(url: string) {
   const response = await fetch(url);
   const blob = await response.blob();
@@ -43,7 +45,7 @@ export async function buildOrderPdf(order: Order, settings: YanSettings | null) 
     doc.text("YAN LIMPEZA", margin, 18);
     doc.setFont("helvetica", "normal");
     doc.setFontSize(9);
-    doc.text("Comprovante de serviço e garantia", margin, 27);
+    doc.text(settings?.pdf_title || "Comprovante de serviço e garantia", margin, 27);
     doc.setFont("helvetica", "bold");
     doc.setFontSize(11);
     doc.text(`ORDEM #${order.order_number}`, pageWidth - margin, 18, { align: "right" });
@@ -83,7 +85,15 @@ export async function buildOrderPdf(order: Order, settings: YanSettings | null) 
     doc.text(lines, x, y + 5);
   };
 
+  const paragraph = (text: string, tone: [number, number, number] = [67, 86, 104]) => {
+    if (!text.trim()) return;
+    const lines = doc.splitTextToSize(text.trim(), pageWidth - margin * 2);
+    ensureSpace(lines.length * 4 + 8);
+    doc.setTextColor(...tone); doc.setFont("helvetica", "normal"); doc.setFontSize(8.8); doc.text(lines, margin, y); y += lines.length * 4 + 8;
+  };
+
   addHeader();
+  paragraph(settings?.pdf_intro || "Obrigado por confiar na Yan Limpeza. Este documento registra o atendimento realizado.", [45, 67, 88]);
   sectionTitle("Cliente e atendimento");
   infoRow("Cliente", order.client?.name ?? "Cliente", margin, 75);
   infoRow("WhatsApp", order.client?.whatsapp ?? "—", 98, 45);
@@ -94,6 +104,7 @@ export async function buildOrderPdf(order: Order, settings: YanSettings | null) 
   y += 16;
 
   sectionTitle("Serviços realizados");
+  paragraph(settings?.pdf_service_notes || "Os serviços abaixo foram executados conforme a avaliação e o combinado com o cliente.");
   (order.items ?? []).forEach((item, index) => {
     ensureSpace(18);
     doc.setFillColor(index % 2 === 0 ? 245 : 250, index % 2 === 0 ? 249 : 252, 253);
@@ -105,23 +116,32 @@ export async function buildOrderPdf(order: Order, settings: YanSettings | null) 
     doc.setFont("helvetica", "normal");
     doc.setFontSize(8);
     const measurement = item.width_m && item.length_m ? ` · ${item.width_m} m × ${item.length_m} m = ${item.quantity} m²` : ` · Quantidade: ${item.quantity}`;
-    doc.text(`${measurement} · ${money(item.line_total)}`, margin + 4, y + 7);
+    doc.text(settings?.pdf_show_prices === false ? measurement : `${measurement} · ${money(item.line_total)}`, margin + 4, y + 7);
     y += 17;
   });
 
-  ensureSpace(25);
-  doc.setFillColor(7, 116, 215);
-  doc.roundedRect(pageWidth - margin - 70, y, 70, 19, 3, 3, "F");
-  doc.setTextColor(220, 239, 255);
-  doc.setFont("helvetica", "normal");
-  doc.setFontSize(7.5);
-  doc.text("VALOR TOTAL", pageWidth - margin - 65, y + 6);
-  doc.setTextColor(255, 255, 255);
-  doc.setFont("helvetica", "bold");
-  doc.setFontSize(15);
-  doc.text(money(order.total), pageWidth - margin - 5, y + 14, { align: "right" });
-  y += 27;
+  if (settings?.pdf_show_prices !== false) {
+    ensureSpace(25);
+    doc.setFillColor(7, 116, 215); doc.roundedRect(pageWidth - margin - 70, y, 70, 19, 3, 3, "F");
+    doc.setTextColor(220, 239, 255); doc.setFont("helvetica", "normal"); doc.setFontSize(7.5); doc.text("VALOR TOTAL", pageWidth - margin - 65, y + 6);
+    doc.setTextColor(255, 255, 255); doc.setFont("helvetica", "bold"); doc.setFontSize(15); doc.text(money(order.total), pageWidth - margin - 5, y + 14, { align: "right" }); y += 27;
+  }
 
+  if (settings?.pdf_show_payment !== false) {
+    sectionTitle("Pagamento");
+    const payments = order.payments ?? []; const receivables = order.receivables ?? [];
+    const paid = payments.reduce((sum, entry) => sum + (entry.kind === "payment" ? Number(entry.amount) : -Number(entry.amount)), 0);
+    const open = receivables.filter((entry) => ["pending", "partial"].includes(entry.status)).reduce((sum, entry) => sum + Number(entry.balance), 0);
+    const methods = [...new Set(payments.filter((entry) => entry.kind === "payment").map((entry) => paymentMethods[entry.method] ?? entry.method))].join(", ");
+    ensureSpace(28); const paymentWidth = (pageWidth - margin * 2 - 8) / 3;
+    [["SITUAÇÃO", open > 0 ? "A receber" : paid > 0 ? "Pago" : "Não informado"], ["VALOR PAGO", money(paid)], ["FORMA", methods || (open > 0 ? "Pagamento futuro" : "Não informada")]].forEach(([label, value], index) => {
+      const x = margin + index * (paymentWidth + 4); doc.setFillColor(242, 247, 251); doc.roundedRect(x, y - 2, paymentWidth, 21, 3, 3, "F"); doc.setTextColor(99, 116, 132); doc.setFont("helvetica", "bold"); doc.setFontSize(7); doc.text(label, x + 4, y + 4); doc.setTextColor(22, 57, 86); doc.setFontSize(10); doc.text(String(value), x + 4, y + 12);
+    }); y += 27;
+    if (open > 0) paragraph(`Saldo em aberto: ${money(open)}. ${receivables.filter((entry) => ["pending", "partial"].includes(entry.status)).map((entry) => `Parcela ${entry.installment_number}: ${money(entry.balance)}, vence em ${new Intl.DateTimeFormat("pt-BR").format(new Date(`${entry.due_date}T12:00:00`))}`).join("; ")}.`);
+    paragraph(settings?.pdf_payment_notes || "Guarde este comprovante para consultar pagamentos, garantia e recomendações.");
+  }
+
+  if (settings?.pdf_show_warranty !== false) {
   sectionTitle("Retorno e garantia");
   ensureSpace(33);
   const boxWidth = (pageWidth - margin * 2 - 6) / 2;
@@ -151,6 +171,9 @@ export async function buildOrderPdf(order: Order, settings: YanSettings | null) 
   const guaranteeLines = doc.splitTextToSize(guarantee, pageWidth - margin * 2);
   doc.text(guaranteeLines, margin, y);
   y += guaranteeLines.length * 4 + 7;
+  }
+
+  if (settings?.pdf_aftercare?.trim()) { sectionTitle("Cuidados depois do serviço"); paragraph(settings.pdf_aftercare); }
 
   if (order.notes) {
     sectionTitle("Observações");
@@ -161,7 +184,7 @@ export async function buildOrderPdf(order: Order, settings: YanSettings | null) 
     y += notes.length * 4 + 8;
   }
 
-  const signed = await signedPhotoUrls(order.photos ?? []);
+  const signed = settings?.pdf_show_photos === false ? [] : await signedPhotoUrls(order.photos ?? []);
   const groups = [
     { title: "Antes do serviço", photos: signed.filter((entry) => entry.photo.phase === "before") },
     { title: "Depois do serviço", photos: signed.filter((entry) => entry.photo.phase === "after") },
@@ -196,7 +219,7 @@ export async function buildOrderPdf(order: Order, settings: YanSettings | null) 
     doc.setTextColor(117, 130, 143);
     doc.setFont("helvetica", "normal");
     doc.setFontSize(7.5);
-    doc.text(`${settings?.business_name ?? "Yan Limpeza"} · ${settings?.whatsapp ?? "(11) 94024-5487"}`, margin, pageHeight - 8);
+    doc.text(settings?.pdf_footer || `${settings?.business_name ?? "Yan Limpeza"} · ${settings?.whatsapp ?? "(11) 94024-5487"}`, margin, pageHeight - 8);
     doc.text(`Página ${page} de ${pages}`, pageWidth - margin, pageHeight - 8, { align: "right" });
   }
 

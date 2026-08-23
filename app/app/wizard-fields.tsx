@@ -6,6 +6,14 @@ import { digits } from "../lib/format";
 import { findClientByWhatsapp, lookupCep, type AddressDraft, type CepStatus } from "../lib/workflow";
 
 export function WizardProgress({ step, labels }: { step: number; labels: string[] }) {
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      const panels = document.querySelectorAll<HTMLElement>(".modal-backdrop .modal-form");
+      panels.item(panels.length - 1)?.scrollTo({ top: 0, behavior: "smooth" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [step]);
+
   return (
     <div className={`wizard-progress steps-${labels.length}`} aria-label={`Etapa ${step} de ${labels.length}`}>
       {labels.map((label, index) => {
@@ -19,6 +27,12 @@ export function WizardProgress({ step, labels }: { step: number; labels: string[
       })}
     </div>
   );
+}
+
+export function revealAboveKeyboard(element: HTMLElement) {
+  const reveal = () => element.closest<HTMLElement>(".client-picker")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  window.requestAnimationFrame(reveal);
+  window.setTimeout(reveal, 320);
 }
 
 export function WhatsappField({

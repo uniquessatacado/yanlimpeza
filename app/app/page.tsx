@@ -17,8 +17,11 @@ export default function ManagementPage() {
       setSession(data.session);
       setLoading(false);
     });
-    const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setSession(nextSession);
+    const { data } = supabase.auth.onAuthStateChange((event, nextSession) => {
+      if (event === "SIGNED_OUT") setSession(null);
+      if (event === "SIGNED_IN") {
+        setSession((current) => current?.user.id === nextSession?.user.id ? current : nextSession);
+      }
       setLoading(false);
     });
     return () => data.subscription.unsubscribe();
