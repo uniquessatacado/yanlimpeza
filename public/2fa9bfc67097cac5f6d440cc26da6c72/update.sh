@@ -6,7 +6,7 @@ APP_USER="yanapp"
 APP_ROOT="/opt/yan-limpeza"
 APP_HOME="/var/lib/yan-limpeza"
 APP_PORT="3107"
-APP_VERSION="16"
+APP_VERSION="17"
 REPO_URL="https://github.com/uniquessatacado/yanlimpeza.git"
 SOURCE_REF="main"
 TMP_DIR="$(mktemp -d)"
@@ -105,7 +105,16 @@ systemctl restart yan-limpeza.service
 
 ready="0"
 for _ in $(seq 1 60); do
-  if curl -fsS --max-time 3 "http://127.0.0.1:${APP_PORT}/" >/dev/null 2>&1; then
+  if ! systemctl is-active --quiet yan-limpeza.service; then
+    sleep 1
+    continue
+  fi
+
+  # O serviço deste servidor escuta em 10.0.3.1. Também testamos loopback
+  # para manter compatibilidade caso a configuração do systemd mude no futuro.
+  if curl -fsS --max-time 3 "http://10.0.3.1:${APP_PORT}/" >/dev/null 2>&1 || \
+     curl -fsS --max-time 3 "http://127.0.0.1:${APP_PORT}/" >/dev/null 2>&1 || \
+     curl -fsS --max-time 3 "http://localhost:${APP_PORT}/" >/dev/null 2>&1; then
     ready="1"
     break
   fi
