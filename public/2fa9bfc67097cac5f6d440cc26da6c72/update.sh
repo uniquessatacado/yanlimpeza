@@ -6,7 +6,7 @@ APP_USER="yanapp"
 APP_ROOT="/opt/yan-limpeza"
 APP_HOME="/var/lib/yan-limpeza"
 APP_PORT="3107"
-APP_VERSION="18"
+APP_VERSION="19"
 REPO_URL="https://github.com/uniquessatacado/yanlimpeza.git"
 SOURCE_REF="main"
 TMP_DIR="$(mktemp -d)"
@@ -102,7 +102,6 @@ mv -Tf "${APP_ROOT}/current.next" "${APP_ROOT}/current"
 SWITCHED_RELEASE="1"
 systemctl restart yan-limpeza.service
 
-# Valida o próprio serviço/processo em vez de assumir um IP específico.
 ready="0"
 stable_checks="0"
 for _ in $(seq 1 30); do
