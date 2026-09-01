@@ -121,6 +121,5 @@ function patchCancellationVerification() {
 }
 
 patchOrderEditor();
-patchClientEditor();
 patchCancellationVerification();
 console.log("Correções de OS e edição de cliente aplicadas antes do build.");

@@ -1189,3 +1189,31 @@ body.modal-scroll-locked {
   .order-details-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
+/* Tapetes: retirada, devolução e recebimento na entrega */
+.profile-actions .delete-client-action { color: #a33b3b; background: #fff1f1; border-color: #efcaca; }
+.profile-actions .delete-client-action:disabled { opacity: .6; }
+.edit-client-form .visual-input input { color: #102f4c !important; background: #fff !important; caret-color: #0873cf; opacity: 1; }
+.delivery-total { min-width: 112px; padding: 13px 18px; display: flex; flex-direction: column; align-items: center; color: #075eaa; background: #e9f5ff; border: 1px solid #b8dcf7; border-radius: 14px; }
+.delivery-total strong { font-size: 25px; line-height: 1; }.delivery-total span { margin-top: 4px; font-size: 10px; font-weight: 800; }
+.delivery-list { display: grid; gap: 12px; }
+.delivery-card { padding: 16px; display: grid; grid-template-columns: 130px minmax(0, 1fr) 150px auto; align-items: center; gap: 18px; background: #fff; border: 1px solid #d8e5ef; border-left: 5px solid #1684d8; border-radius: 16px; box-shadow: 0 7px 22px rgba(22, 71, 109, .06); }
+.delivery-card.overdue { border-left-color: #d5543e; background: #fffafa; }
+.delivery-date, .delivery-value { display: flex; flex-direction: column; }.delivery-date small, .delivery-value small { color: #72879a; font-size: 9px; font-weight: 800; text-transform: uppercase; }.delivery-date strong { margin-top: 5px; color: #17435f; font-size: 15px; }.delivery-card.overdue .delivery-date small, .delivery-card.overdue .delivery-date strong { color: #b13f31; }
+.delivery-main { min-width: 0; }.delivery-main > span { color: #71879a; font-size: 9px; font-weight: 800; }.delivery-main h2 { margin: 4px 0; color: #173b58; font-size: 17px; }.delivery-main p { margin: 0; overflow: hidden; color: #526a7f; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.delivery-main > small { margin-top: 7px; display: flex; align-items: center; gap: 5px; color: #74889a; font-size: 10px; }.delivery-main svg { width: 14px; }
+.delivery-value { padding-left: 16px; border-left: 1px solid #e0e8ef; }.delivery-value strong { margin-top: 5px; color: #11734d; font-size: 18px; }
+.delivery-actions { display: flex; flex-direction: column; gap: 7px; }.delivery-actions a { min-height: 39px; padding: 0 12px; display: flex; align-items: center; justify-content: center; gap: 6px; color: #137b50; background: #edf9f3; border: 1px solid #c7e8d8; border-radius: 10px; font-size: 10px; font-weight: 800; }.delivery-actions svg { width: 16px; }
+.delivery-payment-note, .delivery-confirm-hero { padding: 18px; display: flex; align-items: center; gap: 14px; color: #135f43; background: #edf9f3; border: 1px solid #bfe4d1; border-radius: 15px; }.delivery-payment-note > svg, .delivery-confirm-hero > svg { width: 38px; height: 38px; padding: 8px; color: #fff; background: #16845a; border-radius: 11px; }.delivery-payment-note span, .delivery-confirm-hero span { display: flex; flex-direction: column; }.delivery-payment-note strong, .delivery-confirm-hero strong { font-size: 18px; }.delivery-payment-note small, .delivery-confirm-hero small { margin-top: 4px; color: #557769; font-size: 11px; line-height: 1.4; }
+.mobile-bottom-nav button { position: relative; }.mobile-bottom-nav button > b { min-width: 17px; height: 17px; padding: 0 4px; display: grid; place-items: center; position: absolute; top: 1px; left: calc(50% + 8px); color: #fff; background: #d54d37; border-radius: 99px; font-size: 8px; }
+
+@media (max-width: 900px) {
+  .delivery-card { grid-template-columns: 105px minmax(0, 1fr) 130px; }.delivery-actions { grid-column: 1 / -1; flex-direction: row; }.delivery-actions > * { flex: 1; }
+}
+
+@media (max-width: 560px) {
+  .profile-actions { grid-template-columns: 1fr 1fr; }.profile-actions .edit-client-action, .profile-actions .delete-client-action { min-height: 44px; }
+  .delivery-total { width: 100%; flex-direction: row; justify-content: center; gap: 7px; }.delivery-total span { margin: 0; }
+  .delivery-card { padding: 14px; grid-template-columns: 1fr auto; gap: 11px; }.delivery-date { grid-column: 1; }.delivery-value { grid-column: 2; grid-row: 1; padding-left: 12px; }.delivery-main { grid-column: 1 / -1; }.delivery-actions { grid-column: 1 / -1; flex-direction: column; }.delivery-actions > * { width: 100%; }
+  .delivery-date-reveal { padding: 13px; }.delivery-confirm-hero { align-items: flex-start; }
+  .edit-client-form { padding-bottom: max(18px, env(safe-area-inset-bottom)); }.edit-client-form .visual-input input { min-height: 52px; font-size: 16px !important; }
+}
+

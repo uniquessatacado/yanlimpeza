@@ -121,6 +121,10 @@ export type Order = {
   notes: string | null;
   cancellation_reason: string | null;
   completed_at: string | null;
+  fulfillment_mode: "on_site" | "pickup";
+  delivery_due_date: string | null;
+  delivery_status: "not_required" | "pending" | "delivered";
+  delivered_at: string | null;
   created_at: string;
   client?: Client;
   items?: OrderItem[];
